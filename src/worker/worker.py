@@ -4,6 +4,8 @@ import time
 import requests
 from flask import Flask, jsonify, request
 
+from heartbeat import start_heartbeat_thread
+
 
 app = Flask(__name__)
 
@@ -15,6 +17,9 @@ MODELS = []
 
 MIDDLEWARE_HOST = None
 MIDDLEWARE_PORT = None
+
+HEARTBEAT_INTERVAL = 20
+
 
 @app.get("/health")
 def health():
@@ -153,6 +158,17 @@ if __name__ == "__main__":
     MIDDLEWARE_PORT = args.middleware_port
 
     register_with_middleware()
+
+    heartbeat_url = (
+        f"http://{MIDDLEWARE_HOST}:"
+        f"{MIDDLEWARE_PORT}/heartbeat"
+    )
+
+    start_heartbeat_thread(
+        WORKER_ID,
+        heartbeat_url,
+        HEARTBEAT_INTERVAL
+    )
 
     print(
         f"[WORKER] {WORKER_ID} running at "
