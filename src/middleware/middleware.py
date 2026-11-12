@@ -9,7 +9,7 @@ from flask import Flask, jsonify, request
 from collections import defaultdict
 
 
-HEARTBEAT_URL = "http://127.0.0.1"
+HEARTBEAT_URL = "http://127.0.0.1:8000"
 PING_COOLDOWN = 30
 
 
@@ -152,6 +152,26 @@ def infer():
             "details": str(exc)
         }), 502
 
+@app.post("/heartbeat")
+def recieve_heartbeat():
+    data = request.get_json(silent=True) or {}
+    worker_id = data.get("worker_id")
+
+    if not worker_id:
+        return jsonify({"error": "worker_id is required"}), 400
+
+    with registry_lock:
+        if worker_id not in worker_registry:
+            return jsonify({"error": "worker_id is required"}), 404
+        worker_registry[worker_id]["last_heartbeat"] = time.time()
+
+    print(f"[HEARTBEAT] worker={worker_id}")
+
+    return jsonify({
+        "message": "heartbeat received",
+        "worker_id": worker_id
+    }), 200
+
 # function to find workers that support a specific model
 def find_workers_by_model(model):
     with registry_lock:
@@ -210,23 +230,3 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port
     )
-
-@app.post("/heartbeat")
-def recieve_heartbeat():
-    data = request.get_json(silent=True) or {}
-    worker_id = data.get("worker_id")
-
-    if not worker_id:
-        return jsonify({"error": "worker_id is required"}), 400
-
-    with registry_lock:
-        if worker_id not in worker_registry:
-            return jsonify({"error": "worker_id is required"}), 404
-        worker_registry[worker_id]["last_heartbeat"] = time.time()
-
-    print(f"[HEARTBEAT] worker={worker_id}")
-
-    return jsonify({
-        "message": "heartbeat received",
-        "worker_id": worker_id
-    }), 200
