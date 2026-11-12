@@ -3,14 +3,14 @@ import threading
 import time
 
 import requests
-import asyncio
-import urllib
 from flask import Flask, jsonify, request
 from collections import defaultdict
 
+from failure_detector import start_failure_detector
 
-HEARTBEAT_URL = "http://127.0.0.1:8000"
-PING_COOLDOWN = 30
+
+HEARTBEAT_TIMEOUT = 30
+HEALTH_CHECK_INTERVAL = 1
 
 
 app = Flask(__name__)
@@ -60,7 +60,9 @@ def register_worker():
         "worker_id": data["worker_id"],
         "host": data["host"],
         "port": int(data["port"]),
-        "models": data["models"]
+        "models": data["models"],
+        "status": "healthy",
+        "last_heartbeat": time.time()
     }
 
     with registry_lock:
@@ -153,7 +155,7 @@ def infer():
         }), 502
 
 @app.post("/heartbeat")
-def recieve_heartbeat():
+def receive_heartbeat():
     data = request.get_json(silent=True) or {}
     worker_id = data.get("worker_id")
 
@@ -162,8 +164,13 @@ def recieve_heartbeat():
 
     with registry_lock:
         if worker_id not in worker_registry:
-            return jsonify({"error": "worker_id is required"}), 404
+            return jsonify({
+                "error": "worker not registered",
+                "worker_id": worker_id
+            }), 404
+
         worker_registry[worker_id]["last_heartbeat"] = time.time()
+        worker_registry[worker_id]["status"] = "healthy"
 
     print(f"[HEARTBEAT] worker={worker_id}")
 
@@ -220,6 +227,13 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    start_failure_detector(
+        worker_registry,
+        registry_lock,
+        HEARTBEAT_TIMEOUT,
+        HEALTH_CHECK_INTERVAL
+    )
 
     print(
         f"[MIDDLEWARE] running at "
