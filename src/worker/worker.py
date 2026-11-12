@@ -16,7 +16,6 @@ MODELS = []
 MIDDLEWARE_HOST = None
 MIDDLEWARE_PORT = None
 
-
 @app.get("/health")
 def health():
     return jsonify({

@@ -17,3 +17,5 @@ async def heartbeat_loop():
             print(f"Async heartbeat failed: {e}")
 
     await asyncio.sleep(INTERVAL_SECONDS)
+
+    
