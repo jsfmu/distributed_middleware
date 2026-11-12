@@ -2,8 +2,15 @@ import argparse
 import threading
 
 import requests
+import asyncio
+import urllib
 from flask import Flask, jsonify, request
 from collections import defaultdict
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+HEARTBEAT_URL = "http://127.0.0"
+PING_COOLDOWN = 30
 
 
 app = Flask(__name__)
@@ -203,3 +210,22 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port
     )
+
+class ActiveHeartbeatMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, interval: int = 30):
+        super().__init__(app)
+        self.interval = interval
+
+        self._task = None
+    async def _heartbeart_loop(self):
+        while True:
+            try:
+                await asyncio.to_thread(urllib.request.urlopen, HEARTBEAT_URL, timeout = 5)
+            except Exception:
+                pass
+            await asyncio.sleep(self.interval)
+
+    async def dispatch(self, request, call_next):
+        if self._task is None:
+            self._task = asyncio.create_task(self._heartbeat_loop())
+        return await call_next(request)
