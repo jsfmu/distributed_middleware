@@ -60,7 +60,9 @@ def register_worker():
         "worker_id": data["worker_id"],
         "host": data["host"],
         "port": int(data["port"]),
-        "models": data["models"]
+        "models": data["models"],
+        "status": "healthy",
+        "last_heartbeat": time.time()
     }
 
     with registry_lock:
@@ -162,8 +164,13 @@ def recieve_heartbeat():
 
     with registry_lock:
         if worker_id not in worker_registry:
-            return jsonify({"error": "worker_id is required"}), 404
+            return jsonify({
+                "error": "worker not registered",
+                "worker_id": worker_id
+            }), 404
+
         worker_registry[worker_id]["last_heartbeat"] = time.time()
+        worker_registry[worker_id]["status"] = "healthy"
 
     print(f"[HEARTBEAT] worker={worker_id}")
 
