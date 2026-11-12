@@ -3,6 +3,7 @@ import threading
 
 import requests
 from flask import Flask, jsonify, request
+from collections import defaultdict
 
 
 app = Flask(__name__)
@@ -13,6 +14,8 @@ app = Flask(__name__)
 
 worker_registry = {}
 registry_lock = threading.Lock()
+
+round_robin_index = defaultdict(int)
 
 
 @app.get("/health")
@@ -104,11 +107,11 @@ def infer():
             "model": model
         }), 404
 
-    # Temporary behavior:
-    # use the first compatible worker.
-    #
-    # Proper resource allocation will be added later.
-    selected_worker = matching_workers[0]
+    # Select a worker using round-robin scheduling
+    selected_worker = select_worker_round_robin(
+        model,
+        matching_workers
+    )
 
     worker_url = (
         f"http://{selected_worker['host']}:"
@@ -116,8 +119,9 @@ def infer():
     )
 
     print(
-        f"[DISCOVERY] model={model} "
-        f"worker={selected_worker['worker_id']}"
+        f"[ROUTE] model={model} "
+        f"worker={selected_worker['worker_id']} "
+        f"policy=round_robin"
     )
 
     try:
@@ -152,6 +156,25 @@ def find_workers_by_model(model):
 
     return matching_workers
 
+# function to select a worker using round-robin scheduling
+def select_worker_round_robin(model, workers):
+    if not workers:
+        return None
+
+    workers = sorted(
+        workers,
+        key=lambda worker: worker["worker_id"]
+    )
+
+    index = round_robin_index[model] % len(workers)
+
+    selected_worker = workers[index]
+
+    round_robin_index[model] = (
+        round_robin_index[model] + 1
+    ) % len(workers)
+
+    return selected_worker
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
