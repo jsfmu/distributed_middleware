@@ -1,15 +1,15 @@
 import argparse
 import threading
+import time
 
 import requests
 import asyncio
 import urllib
 from flask import Flask, jsonify, request
 from collections import defaultdict
-from starlette.middleware.base import BaseHTTPMiddleware
 
 
-HEARTBEAT_URL = "http://127.0.0"
+HEARTBEAT_URL = "http://127.0.0.1"
 PING_COOLDOWN = 30
 
 
@@ -211,21 +211,22 @@ if __name__ == "__main__":
         port=args.port
     )
 
-class ActiveHeartbeatMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app, interval: int = 30):
-        super().__init__(app)
-        self.interval = interval
+@app.post("/heartbeat")
+def recieve_heartbeat():
+    data = request.get_json(silent=True) or {}
+    worker_id = data.get("worker_id")
 
-        self._task = None
-    async def _heartbeart_loop(self):
-        while True:
-            try:
-                await asyncio.to_thread(urllib.request.urlopen, HEARTBEAT_URL, timeout = 5)
-            except Exception:
-                pass
-            await asyncio.sleep(self.interval)
+    if not worker_id:
+        return jsonify({"error": "worker_id is required"}), 400
 
-    async def dispatch(self, request, call_next):
-        if self._task is None:
-            self._task = asyncio.create_task(self._heartbeat_loop())
-        return await call_next(request)
+    with registry_lock:
+        if worker_id not in worker_registry:
+            return jsonify({"error": "worker_id is required"}), 404
+        worker_registry[worker_id]["last_heartbeat"] = time.time()
+
+    print(f"[HEARTBEAT] worker={worker_id}")
+
+    return jsonify({
+        "message": "heartbeat received",
+        "worker_id": worker_id
+    }), 200
