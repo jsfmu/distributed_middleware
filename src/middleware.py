@@ -1,4 +1,5 @@
 import argparse
+import threading
 
 import requests
 from flask import Flask, jsonify, request
@@ -7,9 +8,17 @@ from flask import Flask, jsonify, request
 app = Flask(__name__)
 
 
-# For the first prototype, the worker address is static.
-# Dynamic registration and discovery will be added later.
+# Inference still goes to one static worker.
+# Dynamic routing will be implemented later.
 WORKER_URL = "http://127.0.0.1:9001"
+
+
+# ----------------------------------------------------------------------
+# Worker Registry
+# ----------------------------------------------------------------------
+
+worker_registry = {}
+registry_lock = threading.Lock()
 
 
 @app.get("/health")
@@ -17,6 +26,62 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "middleware"
+    })
+
+
+@app.post("/register")
+def register_worker():
+    data = request.get_json(silent=True) or {}
+
+    required_fields = [
+        "worker_id",
+        "host",
+        "port",
+        "models"
+    ]
+
+    missing_fields = [
+        field
+        for field in required_fields
+        if field not in data
+    ]
+
+    if missing_fields:
+        return jsonify({
+            "error": "missing required fields",
+            "missing": missing_fields
+        }), 400
+
+    worker = {
+        "worker_id": data["worker_id"],
+        "host": data["host"],
+        "port": int(data["port"]),
+        "models": data["models"]
+    }
+
+    with registry_lock:
+        worker_registry[worker["worker_id"]] = worker
+
+    print(
+        f"[REGISTER] worker={worker['worker_id']} "
+        f"models={worker['models']} "
+        f"endpoint={worker['host']}:{worker['port']}"
+    )
+
+    return jsonify({
+        "message": "worker registered",
+        "worker": worker
+    }), 201
+
+
+@app.get("/workers")
+def list_workers():
+    with registry_lock:
+        workers = list(worker_registry.values())
+
+    return jsonify({
+        "count": len(workers),
+        "workers": workers
     })
 
 
