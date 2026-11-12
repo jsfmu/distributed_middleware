@@ -3,14 +3,14 @@ import threading
 import time
 
 import requests
-import asyncio
-import urllib
 from flask import Flask, jsonify, request
 from collections import defaultdict
 
+from failure_detector import start_failure_detector
 
-HEARTBEAT_URL = "http://127.0.0.1:8000"
-PING_COOLDOWN = 30
+
+HEARTBEAT_TIMEOUT = 30
+HEALTH_CHECK_INTERVAL = 1
 
 
 app = Flask(__name__)
@@ -155,7 +155,7 @@ def infer():
         }), 502
 
 @app.post("/heartbeat")
-def recieve_heartbeat():
+def receive_heartbeat():
     data = request.get_json(silent=True) or {}
     worker_id = data.get("worker_id")
 
@@ -227,6 +227,13 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    start_failure_detector(
+        worker_registry,
+        registry_lock,
+        HEARTBEAT_TIMEOUT,
+        HEALTH_CHECK_INTERVAL
+    )
 
     print(
         f"[MIDDLEWARE] running at "
