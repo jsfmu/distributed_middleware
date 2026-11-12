@@ -7,12 +7,6 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-
-# Inference still goes to one static worker.
-# Dynamic routing will be implemented later.
-WORKER_URL = "http://127.0.0.1:9001"
-
-
 # ----------------------------------------------------------------------
 # Worker Registry
 # ----------------------------------------------------------------------
@@ -89,29 +83,74 @@ def list_workers():
 def infer():
     data = request.get_json(silent=True) or {}
 
+    model = data.get("model")
     input_data = data.get("input")
+
+    if model is None:
+        return jsonify({
+            "error": "model is required"
+        }), 400
 
     if input_data is None:
         return jsonify({
             "error": "input is required"
         }), 400
 
+    matching_workers = find_workers_by_model(model)
+
+    if not matching_workers:
+        return jsonify({
+            "error": "no worker supports requested model",
+            "model": model
+        }), 404
+
+    # Temporary behavior:
+    # use the first compatible worker.
+    #
+    # Proper resource allocation will be added later.
+    selected_worker = matching_workers[0]
+
+    worker_url = (
+        f"http://{selected_worker['host']}:"
+        f"{selected_worker['port']}/infer"
+    )
+
+    print(
+        f"[DISCOVERY] model={model} "
+        f"worker={selected_worker['worker_id']}"
+    )
+
     try:
         response = requests.post(
-            f"{WORKER_URL}/infer",
+            worker_url,
             json={
+                "model": model,
                 "input": input_data
             },
             timeout=5
         )
 
-        return jsonify(response.json()), response.status_code
+        return jsonify(
+            response.json()
+        ), response.status_code
 
     except requests.RequestException as exc:
         return jsonify({
             "error": "failed to contact worker",
+            "worker_id": selected_worker["worker_id"],
             "details": str(exc)
         }), 502
+
+# function to find workers that support a specific model
+def find_workers_by_model(model):
+    with registry_lock:
+        matching_workers = [
+            worker.copy()
+            for worker in worker_registry.values()
+            if model in worker["models"]
+        ]
+
+    return matching_workers
 
 
 if __name__ == "__main__":
