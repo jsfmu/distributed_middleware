@@ -30,22 +30,37 @@ def health():
 def infer():
     data = request.get_json(silent=True) or {}
 
+    model = data.get("model")
     input_data = data.get("input")
+
+    if model is None:
+        return jsonify({
+            "error": "model is required"
+        }), 400
 
     if input_data is None:
         return jsonify({
             "error": "input is required"
         }), 400
 
+    if model not in MODELS:
+        return jsonify({
+            "error": "model not supported",
+            "worker_id": WORKER_ID,
+            "requested_model": model,
+            "supported_models": MODELS
+        }), 400
+
     time.sleep(0.5)
 
     result = (
         f"Simulated inference result from "
-        f"{WORKER_ID}: {input_data}"
+        f"{WORKER_ID} using {model}: {input_data}"
     )
 
     return jsonify({
         "worker_id": WORKER_ID,
+        "model": model,
         "result": result
     })
 

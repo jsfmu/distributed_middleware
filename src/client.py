@@ -21,6 +21,11 @@ def main():
     )
 
     parser.add_argument(
+        "--model",
+        required=True
+    )
+
+    parser.add_argument(
         "--input",
         required=True
     )
@@ -32,12 +37,15 @@ def main():
         f"{args.middleware_port}/infer"
     )
 
+    payload = {
+        "model": args.model,
+        "input": args.input
+    }
+
     try:
         response = requests.post(
             url,
-            json={
-                "input": args.input
-            },
+            json=payload,
             timeout=10
         )
 
