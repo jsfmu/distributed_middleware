@@ -10,6 +10,8 @@ from heartbeat import start_heartbeat_thread
 
 app = Flask(__name__)
 from metrics import worker_metrics
+from metrics import cpu_load_avg, hardware_info, worker_metrics
+
 
 WORKER_ID = None
 WORKER_HOST = None
@@ -25,6 +27,9 @@ LOAD_PENALTY = 0.0
 
 HEARTBEAT_INTERVAL = 10
 HEARTBEAT_INTERVAL = args.heartbeat_interval
+
+HARDWARE = hardware_info(args.gpu)
+
 
 
 @app.get("/health")
@@ -95,7 +100,10 @@ def compute_delay():
     return max(delay, 0.0)
 
 def heartbeat_payload():
-    return worker_metrics.snapshot()
+    payload = worker_metrics.snapshot()
+    payload["cpu_load_1m"] = cpu_load_avg()
+    return payload
+
 
 def register_with_middleware():
     url = (
@@ -148,6 +156,13 @@ if __name__ == "__main__":
         default=INFERENCE_DELAY,
         help="Base seconds each inference takes"
     )
+
+    parser.add_argument(
+        "--gpu",
+        default="none",
+        help="GPU label to report, e.g. none or A100"
+    )
+
 
     parser.add_argument(
         "--jitter",

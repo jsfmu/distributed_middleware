@@ -1,6 +1,8 @@
 import threading
 from contextlib import contextmanager
 from typing import Optional
+import os
+import platform
 
 class WorkerMetrics:
     def __init__(self, capacity: Optional[int] = None):
@@ -43,5 +45,21 @@ class WorkerMetrics:
             yield
         finally:
             self.decrement()
+
+
+def hardware_info(gpu: str = "none") -> dict:
+    return {
+        "os": platform.system(),
+        "arch": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "gpu": gpu,
+    }
+
+
+def cpu_load_avg() -> Optional[float]:
+    try:
+        return round(os.getloadavg()[0], 2)
+    except (AttributeError, OSError):
+        return None
 
 worker_metrics = WorkerMetrics()
