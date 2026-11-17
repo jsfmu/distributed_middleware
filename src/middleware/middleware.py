@@ -134,6 +134,7 @@ def infer():
         f"[ROUTE] model={model} "
         f"worker={selected_worker['worker_id']} "
         f"load={selected_worker.get('active_requests', 0)} "
+        f"capacity={selected_worker.get('capacity')} "
         f"policy={ROUTING_POLICY}"
     )
 
@@ -224,7 +225,8 @@ if __name__ == "__main__":
         "--routing-policy",
         choices=[
             "round_robin",
-            "least_loaded"
+            "least_loaded",
+            "capacity_aware"
         ],
         default="least_loaded"
     )
