@@ -1,5 +1,6 @@
 import argparse
 import time
+import random
 
 import requests
 from flask import Flask, jsonify, request
@@ -17,6 +18,10 @@ MODELS = []
 
 MIDDLEWARE_HOST = None
 MIDDLEWARE_PORT = None
+
+INFERENCE_DELAY = 0.5
+DELAY_JITTER = 0.0
+LOAD_PENALTY = 0.0
 
 HEARTBEAT_INTERVAL = 10
 
@@ -62,7 +67,7 @@ def infer():
         }), 400
 
     with worker_metrics.track_request():
-        time.sleep(0.5)
+        time.sleep(compute_delay())
 
         result = (
             f"Simulated inference result from "
@@ -74,6 +79,21 @@ def infer():
         "model": model,
         "result": result
     })
+
+def compute_delay():
+    """How long this simulated inference takes."""
+    delay = INFERENCE_DELAY
+
+    if DELAY_JITTER > 0:
+        delay += random.uniform(-DELAY_JITTER, DELAY_JITTER)
+
+    if LOAD_PENALTY > 0:
+        # get_load() includes this request, so subtract 1 to count the others
+        other_requests = worker_metrics.get_load() - 1
+        delay *= 1 + LOAD_PENALTY * other_requests
+
+    return max(delay, 0.0)
+
 
 
 def register_with_middleware():
@@ -122,6 +142,28 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--delay",
+        type=float,
+        default=INFERENCE_DELAY,
+        help="Base seconds each inference takes"
+    )
+
+    parser.add_argument(
+        "--jitter",
+        type=float,
+        default=0.0,
+        help="Random +/- seconds added to each delay"
+    )
+
+    parser.add_argument(
+        "--load-penalty",
+        type=float,
+        default=0.0,
+        help="Extra delay fraction per other active request"
+    )
+
+
+    parser.add_argument(
         "--host",
         default="127.0.0.1"
     )
@@ -134,6 +176,10 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--models",
+            INFERENCE_DELAY = args.delay
+        DELAY_JITTER = args.jitter
+        LOAD_PENALTY = args.load_penalty
+
         required=True,
         help="Comma-separated model names"
     )
