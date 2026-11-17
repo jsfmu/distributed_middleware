@@ -26,6 +26,23 @@ class WorkerMetrics:
             self._completed += 1
             return self._active
 
+    def try_acquire(self) -> bool:
+        """Increment only if below capacity.
+
+        The check and the increment happen under one lock, so two threads
+        can never both take the last free slot.
+        """
+        with self._lock:
+            if self.capacity is not None and self._active >= self.capacity:
+                return False
+            self._active += 1
+            self._peak = max(self._peak, self._active)
+            return True
+
+    def get_load(self) -> int:
+        with self._lock:
+            return self._active
+
     def snapshot(self)->dict:
         with self._lock:
             available = None
@@ -34,7 +51,7 @@ class WorkerMetrics:
             return {"active_requests": self._active,
                     "peak_load": self._peak,
                     "completed_requests": self._completed,
-                    "capacityy": self.capacity,
+                    "capacity": self.capacity,
                     "available_slots": available,
             }
 

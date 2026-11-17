@@ -26,9 +26,8 @@ DELAY_JITTER = 0.0
 LOAD_PENALTY = 0.0
 
 HEARTBEAT_INTERVAL = 10
-HEARTBEAT_INTERVAL = args.heartbeat_interval
 
-HARDWARE = hardware_info(args.gpu)
+HARDWARE = {}
 
 
 
@@ -213,6 +212,12 @@ if __name__ == "__main__":
         default=8000
     )
 
+    parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help="Skip middleware registration (test the worker alone)"
+    )
+
     args = parser.parse_args()
 
     WORKER_ID = args.id
@@ -227,10 +232,11 @@ if __name__ == "__main__":
 
     MIDDLEWARE_HOST = args.middleware_host
     MIDDLEWARE_PORT = args.middleware_port
-    INFERENCE_DELAY = args.delay,
-    DELAY_JITTER = args.jitter,
-    LOAD_PENALTY = args.load_penalty,
+    INFERENCE_DELAY = args.delay
+    DELAY_JITTER = args.jitter
+    LOAD_PENALTY = args.load_penalty
     HEARTBEAT_INTERVAL = args.heartbeat_interval
+    HARDWARE = hardware_info(args.gpu)
 
     if args.standalone:
         print(
@@ -261,10 +267,4 @@ if __name__ == "__main__":
     app.run(
         host=WORKER_HOST,
         port=WORKER_PORT
-    )
-
-    parser.add_argument(
-        "--standalone",
-        action="store_true",
-        help="Skip middleware registration (test the worker alone)"
     )
