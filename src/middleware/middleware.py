@@ -226,7 +226,8 @@ if __name__ == "__main__":
         choices=[
             "round_robin",
             "least_loaded",
-            "capacity_aware"
+            "capacity_aware",
+            "power_of_two"
         ],
         default="least_loaded"
     )

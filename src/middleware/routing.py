@@ -1,7 +1,10 @@
+
+import random
 from collections import defaultdict
 
 
 round_robin_index = defaultdict(int)
+
 
 # Round-robin scheduling
 def select_worker_round_robin(model, workers):
@@ -23,6 +26,7 @@ def select_worker_round_robin(model, workers):
 
     return selected_worker
 
+
 # Least-loaded scheduling
 def select_worker_least_loaded(workers):
     if not workers:
@@ -37,6 +41,7 @@ def select_worker_least_loaded(workers):
     )
 
     return workers[0]
+
 
 # Capacity-aware scheduling
 def select_worker_capacity_aware(workers):
@@ -61,6 +66,28 @@ def select_worker_capacity_aware(workers):
     )
 
 
+# Power of Two Choices scheduling
+def select_worker_power_of_two(workers):
+    if not workers:
+        return None
+
+    if len(workers) == 1:
+        return workers[0]
+
+    first, second = random.sample(workers, 2)
+
+    first_load = first.get("active_requests", 0)
+    second_load = second.get("active_requests", 0)
+
+    if first_load < second_load:
+        return first
+
+    if second_load < first_load:
+        return second
+
+    return random.choice([first, second])
+
+
 # Function to select a worker based on the routing policy
 def select_worker(policy, model, workers):
     if policy == "round_robin":
@@ -76,6 +103,11 @@ def select_worker(policy, model, workers):
 
     if policy == "capacity_aware":
         return select_worker_capacity_aware(
+            workers
+        )
+
+    if policy == "power_of_two":
+        return select_worker_power_of_two(
             workers
         )
 
