@@ -24,6 +24,7 @@ DELAY_JITTER = 0.0
 LOAD_PENALTY = 0.0
 
 HEARTBEAT_INTERVAL = 10
+HEARTBEAT_INTERVAL = args.heartbeat_interval
 
 
 @app.get("/health")
@@ -81,7 +82,6 @@ def infer():
     })
 
 def compute_delay():
-    """How long this simulated inference takes."""
     delay = INFERENCE_DELAY
 
     if DELAY_JITTER > 0:
@@ -94,7 +94,8 @@ def compute_delay():
 
     return max(delay, 0.0)
 
-
+def heartbeat_payload():
+    return worker_metrics.snapshot()
 
 def register_with_middleware():
     url = (
@@ -162,6 +163,12 @@ if __name__ == "__main__":
         help="Extra delay fraction per other active request"
     )
 
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=HEARTBEAT_INTERVAL,
+        help="Seconds between heartbeats"
+    )
 
     parser.add_argument(
         "--host",
@@ -208,6 +215,7 @@ if __name__ == "__main__":
     INFERENCE_DELAY = args.delay,
     DELAY_JITTER = args.jitter,
     LOAD_PENALTY = args.load_penalty,
+    HEARTBEAT_INTERVAL = args.heartbeat_interval
 
     register_with_middleware()
 
@@ -219,7 +227,8 @@ if __name__ == "__main__":
     start_heartbeat_thread(
         WORKER_ID,
         heartbeat_url,
-        HEARTBEAT_INTERVAL
+        HEARTBEAT_INTERVAL,
+        payload_fn=heartbeat_payload
     )
 
     print(
