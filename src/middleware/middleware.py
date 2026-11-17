@@ -6,15 +6,14 @@ import requests
 from flask import Flask, jsonify, request
 
 from failure_detector import start_failure_detector
-from routing import (
-    select_worker_least_loaded,
-    select_worker_round_robin
-)
+from routing import select_worker
 
 
 HEARTBEAT_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 1
 
+# Choose the routing policy 
+ROUTING_POLICY = "least_loaded"
 
 app = Flask(__name__)
 
@@ -119,14 +118,10 @@ def infer():
             "model": model
         }), 404
 
-    # Select a worker using round-robin scheduling
-    # selected_worker = select_worker_round_robin(
-    #     model,
-    #     matching_workers
-    # )
-
-    # Select a worker using least-loaded scheduling
-    selected_worker = select_worker_least_loaded(
+    # Select a worker based on the routing policy
+    selected_worker = select_worker(
+        ROUTING_POLICY,
+        model,
         matching_workers
     )
 
@@ -135,17 +130,11 @@ def infer():
         f"{selected_worker['port']}/infer"
     )
 
-    # print(
-    #     f"[ROUTE] model={model} "
-    #     f"worker={selected_worker['worker_id']} "
-    #     f"policy=round_robin"
-    # )
-
     print(
         f"[ROUTE] model={model} "
         f"worker={selected_worker['worker_id']} "
         f"load={selected_worker.get('active_requests', 0)} "
-        f"policy=least_loaded"
+        f"policy={ROUTING_POLICY}"
     )
 
     try:
@@ -231,7 +220,18 @@ if __name__ == "__main__":
         default=8000
     )
 
+    parser.add_argument(
+        "--routing-policy",
+        choices=[
+            "round_robin",
+            "least_loaded"
+        ],
+        default="least_loaded"
+    )
+
     args = parser.parse_args()
+
+    ROUTING_POLICY = args.routing_policy
 
     start_failure_detector(
         worker_registry,
@@ -242,7 +242,8 @@ if __name__ == "__main__":
 
     print(
         f"[MIDDLEWARE] running at "
-        f"http://{args.host}:{args.port}"
+        f"http://{args.host}:{args.port} "
+        f"routing_policy={ROUTING_POLICY}"
     )
 
     app.run(

@@ -37,3 +37,20 @@ def select_worker_least_loaded(workers):
     )
 
     return workers[0]
+
+
+def select_worker(policy, model, workers):
+    if policy == "round_robin":
+        return select_worker_round_robin(
+            model,
+            workers
+        )
+
+    if policy == "least_loaded":
+        return select_worker_least_loaded(
+            workers
+        )
+
+    raise ValueError(
+        f"unsupported routing policy: {policy}"
+    )
