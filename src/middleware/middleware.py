@@ -28,7 +28,8 @@ registry_lock = threading.Lock()
 def health():
     return jsonify({
         "status": "healthy",
-        "service": "middleware"
+        "service": "middleware",
+        "routing_policy": ROUTING_POLICY
     })
 
 
@@ -159,9 +160,12 @@ def infer():
             timeout=5
         )
 
-        return jsonify(
-            response.json()
-        ), response.status_code
+        result = jsonify(response.json())
+
+        result.headers["X-Routing-Policy"] = selected_policy
+        result.headers["X-Routing-Reason"] = policy_reason
+
+        return result, response.status_code
 
     except requests.RequestException as exc:
         return jsonify({
