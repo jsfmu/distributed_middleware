@@ -258,18 +258,17 @@ if __name__ == "__main__":
     else:
         register_with_middleware()
 
+        heartbeat_url = (
+            f"http://{MIDDLEWARE_HOST}:"
+            f"{MIDDLEWARE_PORT}/heartbeat"
+        )
 
-    heartbeat_url = (
-        f"http://{MIDDLEWARE_HOST}:"
-        f"{MIDDLEWARE_PORT}/heartbeat"
-    )
-
-    start_heartbeat_thread(
-        WORKER_ID,
-        heartbeat_url,
-        HEARTBEAT_INTERVAL,
-        payload_fn=heartbeat_payload
-    )
+        start_heartbeat_thread(
+            WORKER_ID,
+            heartbeat_url,
+            HEARTBEAT_INTERVAL,
+            payload_fn=heartbeat_payload
+        )
 
     print(
         f"[WORKER] {WORKER_ID} running at "

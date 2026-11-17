@@ -1,9 +1,12 @@
 
+import math
 import random
+import threading
 from collections import defaultdict
 
 
 round_robin_index = defaultdict(int)
+round_robin_lock = threading.Lock()
 
 
 # Round-robin scheduling
@@ -16,13 +19,14 @@ def select_worker_round_robin(model, workers):
         key=lambda worker: worker["worker_id"]
     )
 
-    index = round_robin_index[model] % len(workers)
+    with round_robin_lock:
+        index = round_robin_index[model] % len(workers)
 
-    selected_worker = workers[index]
+        selected_worker = workers[index]
 
-    round_robin_index[model] = (
-        round_robin_index[model] + 1
-    ) % len(workers)
+        round_robin_index[model] = (
+            index + 1
+        ) % len(workers)
 
     return selected_worker
 
@@ -43,24 +47,35 @@ def select_worker_least_loaded(workers):
     return workers[0]
 
 
+# Check whether a worker advertises valid capacity
+def has_valid_capacity(worker):
+    capacity = worker.get("capacity")
+
+    return (
+        type(capacity) in (int, float)
+        and math.isfinite(capacity)
+        and capacity > 0
+    )
+
+
 # Capacity-aware scheduling
 def select_worker_capacity_aware(workers):
     if not workers:
         return None
 
-    def utilization(worker):
-        active_requests = worker.get("active_requests", 0)
-        capacity = worker.get("capacity")
+    valid_workers = [
+        worker
+        for worker in workers
+        if has_valid_capacity(worker)
+    ]
 
-        if capacity is None or capacity <= 0:
-            return float("inf")
-
-        return active_requests / capacity
+    if not valid_workers:
+        return None
 
     return min(
-        workers,
+        valid_workers,
         key=lambda worker: (
-            utilization(worker),
+            worker.get("active_requests", 0) / worker["capacity"],
             worker["worker_id"]
         )
     )
@@ -115,8 +130,8 @@ def choose_routing_policy(workers):
     ]
 
     valid_capacities = all(
-        isinstance(capacity, (int, float)) and capacity > 0
-        for capacity in capacities
+        has_valid_capacity(worker)
+        for worker in workers
     )
 
     # Prefer relative utilization for heterogeneous workers
@@ -148,7 +163,16 @@ def select_worker(policy, model, workers):
         )
 
     if policy == "capacity_aware":
-        return select_worker_capacity_aware(
+        selected_worker = select_worker_capacity_aware(
+            workers
+        )
+
+        if selected_worker is not None:
+            return selected_worker
+
+        # No valid capacities: use round robin
+        return select_worker_round_robin(
+            model,
             workers
         )
 
