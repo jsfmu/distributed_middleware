@@ -6,14 +6,14 @@ import requests
 from flask import Flask, jsonify, request
 
 from failure_detector import start_failure_detector
-from routing import select_worker
+from routing import choose_routing_policy, select_worker
 
 
 HEARTBEAT_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 1
 
 # Choose the routing policy 
-ROUTING_POLICY = "least_loaded"
+ROUTING_POLICY = "adaptive"
 
 app = Flask(__name__)
 
@@ -118,9 +118,18 @@ def infer():
             "model": model
         }), 404
 
-    # Select a worker based on the routing policy
+    # Determine which routing policy to use
+    selected_policy = ROUTING_POLICY
+    policy_reason = "manual_override"
+
+    if ROUTING_POLICY == "adaptive":
+        selected_policy, policy_reason = choose_routing_policy(
+            matching_workers
+        )
+
+    # Select a worker using the chosen policy
     selected_worker = select_worker(
-        ROUTING_POLICY,
+        selected_policy,
         model,
         matching_workers
     )
@@ -135,7 +144,9 @@ def infer():
         f"worker={selected_worker['worker_id']} "
         f"load={selected_worker.get('active_requests', 0)} "
         f"capacity={selected_worker.get('capacity')} "
-        f"policy={ROUTING_POLICY}"
+        f"mode={ROUTING_POLICY} "
+        f"policy={selected_policy} "
+        f"reason={policy_reason}"
     )
 
     try:
@@ -227,9 +238,10 @@ if __name__ == "__main__":
             "round_robin",
             "least_loaded",
             "capacity_aware",
-            "power_of_two"
+            "power_of_two",
+            "adaptive"
         ],
-        default="least_loaded"
+        default="adaptive"
     )
 
     args = parser.parse_args()

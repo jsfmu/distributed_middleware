@@ -88,6 +88,52 @@ def select_worker_power_of_two(workers):
     return random.choice([first, second])
 
 
+# Adaptive routing policy selection
+def choose_routing_policy(workers):
+    if len(workers) <= 1:
+        return "round_robin", "single_worker"
+
+    loads = [
+        worker.get("active_requests")
+        for worker in workers
+    ]
+
+    # Fall back to round robin if load information is invalid
+    if any(
+        not isinstance(load, (int, float)) or load < 0
+        for load in loads
+    ):
+        return "round_robin", "missing_load_information"
+
+    # No active requests: use simple round-robin distribution
+    if max(loads) == 0:
+        return "round_robin", "all_workers_idle"
+
+    capacities = [
+        worker.get("capacity")
+        for worker in workers
+    ]
+
+    valid_capacities = all(
+        isinstance(capacity, (int, float)) and capacity > 0
+        for capacity in capacities
+    )
+
+    # Prefer relative utilization for heterogeneous workers
+    if valid_capacities and len(set(capacities)) > 1:
+        return "capacity_aware", "different_worker_capacities"
+
+    # React to significant load imbalance
+    if max(loads) - min(loads) >= 2:
+        return "least_loaded", "load_imbalance"
+
+    # Sample two candidates in a larger worker pool
+    if len(workers) >= 4:
+        return "power_of_two", "large_worker_pool"
+
+    return "round_robin", "similar_worker_loads"
+
+
 # Function to select a worker based on the routing policy
 def select_worker(policy, model, workers):
     if policy == "round_robin":
