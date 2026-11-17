@@ -6,7 +6,10 @@ import requests
 from flask import Flask, jsonify, request
 
 from failure_detector import start_failure_detector
-from routing import select_worker_round_robin
+from routing import (
+    select_worker_least_loaded,
+    select_worker_round_robin
+)
 
 
 HEARTBEAT_TIMEOUT = 30
@@ -117,8 +120,13 @@ def infer():
         }), 404
 
     # Select a worker using round-robin scheduling
-    selected_worker = select_worker_round_robin(
-        model,
+    # selected_worker = select_worker_round_robin(
+    #     model,
+    #     matching_workers
+    # )
+
+    # Select a worker using least-loaded scheduling
+    selected_worker = select_worker_least_loaded(
         matching_workers
     )
 
@@ -127,10 +135,17 @@ def infer():
         f"{selected_worker['port']}/infer"
     )
 
+    # print(
+    #     f"[ROUTE] model={model} "
+    #     f"worker={selected_worker['worker_id']} "
+    #     f"policy=round_robin"
+    # )
+
     print(
         f"[ROUTE] model={model} "
         f"worker={selected_worker['worker_id']} "
-        f"policy=round_robin"
+        f"load={selected_worker.get('active_requests', 0)} "
+        f"policy=least_loaded"
     )
 
     try:

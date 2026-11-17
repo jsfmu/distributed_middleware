@@ -22,3 +22,18 @@ def select_worker_round_robin(model, workers):
     ) % len(workers)
 
     return selected_worker
+
+
+def select_worker_least_loaded(workers):
+    if not workers:
+        return None
+
+    workers = sorted(
+        workers,
+        key=lambda worker: (
+            worker.get("active_requests", 0),
+            worker["worker_id"]
+        )
+    )
+
+    return workers[0]
