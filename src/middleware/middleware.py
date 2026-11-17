@@ -62,7 +62,10 @@ def register_worker():
         "port": int(data["port"]),
         "models": data["models"],
         "status": "healthy",
-        "last_heartbeat": time.time()
+        "last_heartbeat": time.time(),
+        "active_requests": 0,
+        "capacity": data.get("capacity"),
+        "hardware": data.get("hardware", {})
     }
 
     with registry_lock:
@@ -171,8 +174,15 @@ def receive_heartbeat():
 
         worker_registry[worker_id]["last_heartbeat"] = time.time()
         worker_registry[worker_id]["status"] = "healthy"
+        worker_registry[worker_id]["active_requests"] = data.get("active_requests", 0)
+        worker_registry[worker_id]["capacity"] = data.get("capacity")
+        worker_registry[worker_id]["cpu_load_1m"] = data.get("cpu_load_1m")
 
-    print(f"[HEARTBEAT] worker={worker_id}")
+    print(
+        f"[HEARTBEAT] worker={worker_id} "
+        f"load={data.get('active_requests', 0)}"
+    )
+
 
     return jsonify({
         "message": "heartbeat received",
@@ -185,7 +195,10 @@ def find_workers_by_model(model):
         matching_workers = [
             worker.copy()
             for worker in worker_registry.values()
-            if model in worker["models"]
+            if (
+                model in worker["models"]
+                and worker["status"] == "healthy"
+            )
         ]
 
     return matching_workers

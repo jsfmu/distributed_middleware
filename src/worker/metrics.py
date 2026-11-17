@@ -1,0 +1,82 @@
+import threading
+from contextlib import contextmanager
+from typing import Optional
+import os
+import platform
+
+class WorkerMetrics:
+    def __init__(self, capacity: Optional[int] = None):
+        self.capacity = capacity
+        self._lock = threading.Lock()
+        self._active = 0
+        self._peak = 0
+        self._completed = 0
+
+    def increment(self)->int:
+        with self._lock:
+            self._active += 1
+            self._peak = max(self._peak, self._active)
+            return self._active
+
+    def decrement(self) -> int:
+        with self._lock:
+            if self._active == 0:
+                raise RuntimeError("decrement() called with no active requests")
+            self._active -= 1
+            self._completed += 1
+            return self._active
+
+    def try_acquire(self) -> bool:
+        """Increment only if below capacity.
+
+        The check and the increment happen under one lock, so two threads
+        can never both take the last free slot.
+        """
+        with self._lock:
+            if self.capacity is not None and self._active >= self.capacity:
+                return False
+            self._active += 1
+            self._peak = max(self._peak, self._active)
+            return True
+
+    def get_load(self) -> int:
+        with self._lock:
+            return self._active
+
+    def snapshot(self)->dict:
+        with self._lock:
+            available = None
+            if self.capacity is not None: available = max(self.capacity - self._active, 0)
+
+            return {"active_requests": self._active,
+                    "peak_load": self._peak,
+                    "completed_requests": self._completed,
+                    "capacity": self.capacity,
+                    "available_slots": available,
+            }
+
+    @contextmanager
+    def track_request(self):
+        self.increment()
+        try:
+            yield
+        finally:
+            self.decrement()
+
+
+def hardware_info(gpu: str = "none") -> dict:
+    return {
+        "os": platform.system(),
+        "arch": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "gpu": gpu,
+    }
+
+
+def cpu_load_avg() -> Optional[float]:
+    try:
+        return round(os.getloadavg()[0], 2)
+    except (AttributeError, OSError):
+        return None
+
+worker_metrics = WorkerMetrics()

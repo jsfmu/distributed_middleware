@@ -1,5 +1,6 @@
 import argparse
 import time
+import random
 
 import requests
 from flask import Flask, jsonify, request
@@ -8,6 +9,8 @@ from heartbeat import start_heartbeat_thread
 
 
 app = Flask(__name__)
+from metrics import worker_metrics
+from metrics import cpu_load_avg, hardware_info, worker_metrics
 
 
 WORKER_ID = None
@@ -18,7 +21,14 @@ MODELS = []
 MIDDLEWARE_HOST = None
 MIDDLEWARE_PORT = None
 
+INFERENCE_DELAY = 0.5
+DELAY_JITTER = 0.0
+LOAD_PENALTY = 0.0
+
 HEARTBEAT_INTERVAL = 10
+
+HARDWARE = {}
+
 
 
 @app.get("/health")
@@ -29,6 +39,12 @@ def health():
         "worker_id": WORKER_ID
     })
 
+@app.get("/metrics")
+def get_metrics():
+    return jsonify({
+        "worker_id": WORKER_ID,
+        **worker_metrics.snapshot()
+    })
 
 @app.post("/infer")
 def infer():
@@ -55,18 +71,37 @@ def infer():
             "supported_models": MODELS
         }), 400
 
-    time.sleep(0.5)
+    with worker_metrics.track_request():
+        time.sleep(compute_delay())
 
-    result = (
-        f"Simulated inference result from "
-        f"{WORKER_ID} using {model}: {input_data}"
-    )
+        result = (
+            f"Simulated inference result from "
+            f"{WORKER_ID} using {model}: {input_data}"
+        )
 
     return jsonify({
         "worker_id": WORKER_ID,
         "model": model,
         "result": result
     })
+
+def compute_delay():
+    delay = INFERENCE_DELAY
+
+    if DELAY_JITTER > 0:
+        delay += random.uniform(-DELAY_JITTER, DELAY_JITTER)
+
+    if LOAD_PENALTY > 0:
+        # get_load() includes this request, so subtract 1 to count the others
+        other_requests = worker_metrics.get_load() - 1
+        delay *= 1 + LOAD_PENALTY * other_requests
+
+    return max(delay, 0.0)
+
+def heartbeat_payload():
+    payload = worker_metrics.snapshot()
+    payload["cpu_load_1m"] = cpu_load_avg()
+    return payload
 
 
 def register_with_middleware():
@@ -115,6 +150,41 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--delay",
+        type=float,
+        default=INFERENCE_DELAY,
+        help="Base seconds each inference takes"
+    )
+
+    parser.add_argument(
+        "--gpu",
+        default="none",
+        help="GPU label to report, e.g. none or A100"
+    )
+
+
+    parser.add_argument(
+        "--jitter",
+        type=float,
+        default=0.0,
+        help="Random +/- seconds added to each delay"
+    )
+
+    parser.add_argument(
+        "--load-penalty",
+        type=float,
+        default=0.0,
+        help="Extra delay fraction per other active request"
+    )
+
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=HEARTBEAT_INTERVAL,
+        help="Seconds between heartbeats"
+    )
+
+    parser.add_argument(
         "--host",
         default="127.0.0.1"
     )
@@ -128,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--models",
         required=True,
-        help="Comma-separated model names"
+        help="Comma-separated model names",
     )
 
     parser.add_argument(
@@ -140,6 +210,12 @@ if __name__ == "__main__":
         "--middleware-port",
         type=int,
         default=8000
+    )
+
+    parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help="Skip middleware registration (test the worker alone)"
     )
 
     args = parser.parse_args()
@@ -156,8 +232,20 @@ if __name__ == "__main__":
 
     MIDDLEWARE_HOST = args.middleware_host
     MIDDLEWARE_PORT = args.middleware_port
+    INFERENCE_DELAY = args.delay
+    DELAY_JITTER = args.jitter
+    LOAD_PENALTY = args.load_penalty
+    HEARTBEAT_INTERVAL = args.heartbeat_interval
+    HARDWARE = hardware_info(args.gpu)
 
-    register_with_middleware()
+    if args.standalone:
+        print(
+            f"[STANDALONE] worker={WORKER_ID} "
+            f"skipping middleware registration"
+        )
+    else:
+        register_with_middleware()
+
 
     heartbeat_url = (
         f"http://{MIDDLEWARE_HOST}:"
@@ -167,7 +255,8 @@ if __name__ == "__main__":
     start_heartbeat_thread(
         WORKER_ID,
         heartbeat_url,
-        HEARTBEAT_INTERVAL
+        HEARTBEAT_INTERVAL,
+        payload_fn=heartbeat_payload
     )
 
     print(
