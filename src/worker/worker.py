@@ -232,7 +232,14 @@ if __name__ == "__main__":
     LOAD_PENALTY = args.load_penalty,
     HEARTBEAT_INTERVAL = args.heartbeat_interval
 
-    register_with_middleware()
+    if args.standalone:
+        print(
+            f"[STANDALONE] worker={WORKER_ID} "
+            f"skipping middleware registration"
+        )
+    else:
+        register_with_middleware()
+
 
     heartbeat_url = (
         f"http://{MIDDLEWARE_HOST}:"
@@ -254,4 +261,10 @@ if __name__ == "__main__":
     app.run(
         host=WORKER_HOST,
         port=WORKER_PORT
+    )
+
+    parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help="Skip middleware registration (test the worker alone)"
     )
