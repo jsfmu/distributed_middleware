@@ -195,7 +195,10 @@ def find_workers_by_model(model):
         matching_workers = [
             worker.copy()
             for worker in worker_registry.values()
-            if model in worker["models"]
+            if (
+                model in worker["models"]
+                and worker["status"] == "healthy"
+            )
         ]
 
     return matching_workers
