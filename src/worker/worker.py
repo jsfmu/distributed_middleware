@@ -8,7 +8,7 @@ from heartbeat import start_heartbeat_thread
 
 
 app = Flask(__name__)
-
+from metrics import worker_metrics
 
 WORKER_ID = None
 WORKER_HOST = None
@@ -29,6 +29,12 @@ def health():
         "worker_id": WORKER_ID
     })
 
+@app.get("/metrics")
+def get_metrics():
+    return jsonify({
+        "worker_id": WORKER_ID,
+        **worker_metrics.snapshot()
+    })
 
 @app.post("/infer")
 def infer():
@@ -55,12 +61,13 @@ def infer():
             "supported_models": MODELS
         }), 400
 
-    time.sleep(0.5)
+    with worker_metrics.track_request():
+        time.sleep(0.5)
 
-    result = (
-        f"Simulated inference result from "
-        f"{WORKER_ID} using {model}: {input_data}"
-    )
+        result = (
+            f"Simulated inference result from "
+            f"{WORKER_ID} using {model}: {input_data}"
+        )
 
     return jsonify({
         "worker_id": WORKER_ID,
