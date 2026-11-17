@@ -176,12 +176,8 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--models",
-            INFERENCE_DELAY = args.delay
-        DELAY_JITTER = args.jitter
-        LOAD_PENALTY = args.load_penalty
-
         required=True,
-        help="Comma-separated model names"
+        help="Comma-separated model names",
     )
 
     parser.add_argument(
@@ -209,6 +205,9 @@ if __name__ == "__main__":
 
     MIDDLEWARE_HOST = args.middleware_host
     MIDDLEWARE_PORT = args.middleware_port
+    INFERENCE_DELAY = args.delay,
+    DELAY_JITTER = args.jitter,
+    LOAD_PENALTY = args.load_penalty,
 
     register_with_middleware()
 
