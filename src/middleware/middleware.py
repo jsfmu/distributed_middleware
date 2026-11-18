@@ -4,14 +4,16 @@ import time
 
 import requests
 from flask import Flask, jsonify, request
-from collections import defaultdict
 
 from failure_detector import start_failure_detector
+from routing import choose_routing_policy, select_worker
 
 
 HEARTBEAT_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 1
 
+# Choose the routing policy 
+ROUTING_POLICY = "adaptive"
 
 app = Flask(__name__)
 
@@ -22,14 +24,12 @@ app = Flask(__name__)
 worker_registry = {}
 registry_lock = threading.Lock()
 
-round_robin_index = defaultdict(int)
-
-
 @app.get("/health")
 def health():
     return jsonify({
         "status": "healthy",
-        "service": "middleware"
+        "service": "middleware",
+        "routing_policy": ROUTING_POLICY
     })
 
 
@@ -119,8 +119,18 @@ def infer():
             "model": model
         }), 404
 
-    # Select a worker using round-robin scheduling
-    selected_worker = select_worker_round_robin(
+    # Determine which routing policy to use
+    selected_policy = ROUTING_POLICY
+    policy_reason = "manual_override"
+
+    if ROUTING_POLICY == "adaptive":
+        selected_policy, policy_reason = choose_routing_policy(
+            matching_workers
+        )
+
+    # Select a worker using the chosen policy
+    selected_worker = select_worker(
+        selected_policy,
         model,
         matching_workers
     )
@@ -133,7 +143,11 @@ def infer():
     print(
         f"[ROUTE] model={model} "
         f"worker={selected_worker['worker_id']} "
-        f"policy=round_robin"
+        f"load={selected_worker.get('active_requests', 0)} "
+        f"capacity={selected_worker.get('capacity')} "
+        f"mode={ROUTING_POLICY} "
+        f"policy={selected_policy} "
+        f"reason={policy_reason}"
     )
 
     try:
@@ -146,9 +160,12 @@ def infer():
             timeout=5
         )
 
-        return jsonify(
-            response.json()
-        ), response.status_code
+        result = jsonify(response.json())
+
+        result.headers["X-Routing-Policy"] = selected_policy
+        result.headers["X-Routing-Reason"] = policy_reason
+
+        return result, response.status_code
 
     except requests.RequestException as exc:
         return jsonify({
@@ -203,26 +220,6 @@ def find_workers_by_model(model):
 
     return matching_workers
 
-# function to select a worker using round-robin scheduling
-def select_worker_round_robin(model, workers):
-    if not workers:
-        return None
-
-    workers = sorted(
-        workers,
-        key=lambda worker: worker["worker_id"]
-    )
-
-    index = round_robin_index[model] % len(workers)
-
-    selected_worker = workers[index]
-
-    round_robin_index[model] = (
-        round_robin_index[model] + 1
-    ) % len(workers)
-
-    return selected_worker
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Distributed AI Middleware"
@@ -239,7 +236,21 @@ if __name__ == "__main__":
         default=8000
     )
 
+    parser.add_argument(
+        "--routing-policy",
+        choices=[
+            "round_robin",
+            "least_loaded",
+            "capacity_aware",
+            "power_of_two",
+            "adaptive"
+        ],
+        default="adaptive"
+    )
+
     args = parser.parse_args()
+
+    ROUTING_POLICY = args.routing_policy
 
     start_failure_detector(
         worker_registry,
@@ -250,7 +261,8 @@ if __name__ == "__main__":
 
     print(
         f"[MIDDLEWARE] running at "
-        f"http://{args.host}:{args.port}"
+        f"http://{args.host}:{args.port} "
+        f"routing_policy={ROUTING_POLICY}"
     )
 
     app.run(

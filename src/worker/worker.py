@@ -6,7 +6,7 @@ import requests
 from flask import Flask, jsonify, request
 
 from heartbeat import start_heartbeat_thread
-
+from metrics import cpu_load_avg, hardware_info, worker_metrics
 
 app = Flask(__name__)
 from metrics import cpu_load_avg, hardware_info, worker_metrics
@@ -258,7 +258,19 @@ if __name__ == "__main__":
         help="Skip middleware registration (test the worker alone)"
     )
 
+    parser.add_argument(
+        "--capacity",
+        type=int,
+        default=None,
+        help="Advertised concurrent request capacity used for routing"
+    )
+
     args = parser.parse_args()
+
+    if args.capacity is not None and args.capacity <= 0:
+        parser.error("--capacity must be greater than 0")
+
+    worker_metrics.capacity = args.capacity
 
     WORKER_ID = args.id
     WORKER_HOST = args.host
