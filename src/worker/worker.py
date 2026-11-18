@@ -9,7 +9,6 @@ from heartbeat import start_heartbeat_thread
 
 
 app = Flask(__name__)
-from metrics import worker_metrics
 from metrics import cpu_load_avg, hardware_info, worker_metrics
 
 
@@ -271,8 +270,10 @@ if __name__ == "__main__":
         if model.strip()
     ]
 
-    MIDDLEWARE_HOST = args.middleware_host
-    MIDDLEWARE_PORT = args.middleware_port
+    if args.middleware:
+        MIDDLEWARE_NODES = parse_middleware_list(args.middleware)
+    else:
+        MIDDLEWARE_NODES = [(args.middleware_host, args.middleware_port)]
     INFERENCE_DELAY = args.delay
     DELAY_JITTER = args.jitter
     LOAD_PENALTY = args.load_penalty
@@ -285,20 +286,17 @@ if __name__ == "__main__":
             f"skipping middleware registration"
         )
     else:
-        register_with_middleware()
+        if not register_with_middleware():
+            print(f"[ERROR] worker={WORKER_ID} could not reach any middleware")
+            raise SystemExit(1)
 
-
-    heartbeat_url = (
-        f"http://{MIDDLEWARE_HOST}:"
-        f"{MIDDLEWARE_PORT}/heartbeat"
-    )
-
-    start_heartbeat_thread(
-        WORKER_ID,
-        heartbeat_url,
-        HEARTBEAT_INTERVAL,
-        payload_fn=heartbeat_payload
-    )
+        start_heartbeat_thread(
+            WORKER_ID,
+            current_heartbeat_url,
+            HEARTBEAT_INTERVAL,
+            payload_fn=heartbeat_payload,
+            on_failure=reconnect
+        )
 
     print(
         f"[WORKER] {WORKER_ID} running at "

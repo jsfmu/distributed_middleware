@@ -21,8 +21,16 @@ def build_payload(worker_id: str, payload_fn: PayloadFn = None) -> dict:
     return payload
 
 
-async def heartbeat_loop(worker_id: str, heartbeat_url: str, interval: float, payload_fn: PayloadFn = None, on_failure: Optional[Callable[[], None]] = None, max_failures: int = 2):
+async def heartbeat_loop(
+    worker_id: str,
+    heartbeat_url: UrlSource,
+    interval: float,
+    payload_fn: PayloadFn = None,
+    on_failure: Optional[Callable[[], None]] = None,
+    max_failures: int = 2
+):
     failures = 0
+
     while True:
         # Ask for the URL every beat, so a failover to another middleware is picked up
         url = heartbeat_url() if callable(heartbeat_url) else heartbeat_url
@@ -32,14 +40,14 @@ async def heartbeat_loop(worker_id: str, heartbeat_url: str, interval: float, pa
 
         ok = False
         try:
-            response = await asyncio.to_thread(requests.post, heartbeat_url, json=payload, timeout=5)
-            response.status_code == 200
-            ok = response.status_code
-            print(f"[HEARTBEAT] worker={worker_id} status={response.status_code}")
+            response = await asyncio.to_thread(requests.post, url, json=payload, timeout=5)
+            ok = response.status_code == 200
+            print(f"[HEARTBEAT] worker={worker_id} url={url} status={response.status_code}")
         except requests.RequestException as exc:
-            print(f"[HEARTBEAT ERROR] worker={worker_id} error={exc}")
+            print(f"[HEARTBEAT ERROR] worker={worker_id} url={url} error={exc}")
 
-        if ok: failures = 0
+        if ok:
+            failures = 0
         else:
             failures += 1
             if on_failure is not None and failures >= max_failures:
@@ -49,9 +57,16 @@ async def heartbeat_loop(worker_id: str, heartbeat_url: str, interval: float, pa
 
         await asyncio.sleep(interval)
 
-def start_heartbeat_thread(worker_id: str, heartbeat_url: str, interval: float = 20, payload_fn: PayloadFn = None):
+def start_heartbeat_thread(
+    worker_id: str,
+    heartbeat_url: UrlSource,
+    interval: float = 20,
+    payload_fn: PayloadFn = None,
+    on_failure: Optional[Callable[[], None]] = None,
+    max_failures: int = 2
+):
     def _run_event_loop():
-        asyncio.run(heartbeat_loop(worker_id, heartbeat_url, interval, payload_fn))
+        asyncio.run(heartbeat_loop(worker_id, heartbeat_url, interval, payload_fn, on_failure, max_failures))
 
     thread = threading.Thread(target=_run_event_loop, daemon=True)
     thread.start()

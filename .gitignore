@@ -46,3 +46,5 @@ dist/
 # Temporary files
 tmp/
 temp/
+# Multi-node scripts (pid files)
+run/
