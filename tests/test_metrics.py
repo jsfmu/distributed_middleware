@@ -1,9 +1,13 @@
+import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src" / "worker"))
 
 from metrics import WorkerMetrics
-
 
 class TestWorkerMetrics(unittest.TestCase):
     def setUp(self):
