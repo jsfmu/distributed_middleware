@@ -6,11 +6,9 @@ import requests
 from flask import Flask, jsonify, request
 
 from heartbeat import start_heartbeat_thread
-
+from metrics import cpu_load_avg, hardware_info, worker_metrics
 
 app = Flask(__name__)
-from metrics import worker_metrics
-from metrics import cpu_load_avg, hardware_info, worker_metrics
 
 
 WORKER_ID = None
@@ -114,7 +112,9 @@ def register_with_middleware():
         "worker_id": WORKER_ID,
         "host": WORKER_HOST,
         "port": WORKER_PORT,
-        "models": MODELS
+        "models": MODELS,
+        "capacity": worker_metrics.capacity,
+        "hardware": HARDWARE
     }
 
     try:
@@ -218,7 +218,19 @@ if __name__ == "__main__":
         help="Skip middleware registration (test the worker alone)"
     )
 
+    parser.add_argument(
+        "--capacity",
+        type=int,
+        default=None,
+        help="Advertised concurrent request capacity used for routing"
+    )
+
     args = parser.parse_args()
+
+    if args.capacity is not None and args.capacity <= 0:
+        parser.error("--capacity must be greater than 0")
+
+    worker_metrics.capacity = args.capacity
 
     WORKER_ID = args.id
     WORKER_HOST = args.host
@@ -246,18 +258,17 @@ if __name__ == "__main__":
     else:
         register_with_middleware()
 
+        heartbeat_url = (
+            f"http://{MIDDLEWARE_HOST}:"
+            f"{MIDDLEWARE_PORT}/heartbeat"
+        )
 
-    heartbeat_url = (
-        f"http://{MIDDLEWARE_HOST}:"
-        f"{MIDDLEWARE_PORT}/heartbeat"
-    )
-
-    start_heartbeat_thread(
-        WORKER_ID,
-        heartbeat_url,
-        HEARTBEAT_INTERVAL,
-        payload_fn=heartbeat_payload
-    )
+        start_heartbeat_thread(
+            WORKER_ID,
+            heartbeat_url,
+            HEARTBEAT_INTERVAL,
+            payload_fn=heartbeat_payload
+        )
 
     print(
         f"[WORKER] {WORKER_ID} running at "
