@@ -18,8 +18,8 @@ WORKER_HOST = None
 WORKER_PORT = None
 MODELS = []
 
-MIDDLEWARE_HOST = None
-MIDDLEWARE_PORT = None
+MIDDLEWARE_NODES = []
+current_middleware = 0
 
 INFERENCE_DELAY = 0.5
 DELAY_JITTER = 0.0
@@ -104,39 +104,72 @@ def heartbeat_payload():
     return payload
 
 
+def parse_middleware_list(text):
+    nodes = []
+
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+
+        host, _, port = item.rpartition(":")
+        nodes.append((host or "127.0.0.1", int(port)))
+
+    return nodes
+
+
+def current_heartbeat_url():
+    host, port = MIDDLEWARE_NODES[current_middleware]
+    return f"http://{host}:{port}/heartbeat"
+
+
 def register_with_middleware():
-    url = (
-        f"http://{MIDDLEWARE_HOST}:"
-        f"{MIDDLEWARE_PORT}/register"
-    )
+    global current_middleware
 
     payload = {
         "worker_id": WORKER_ID,
         "host": WORKER_HOST,
         "port": WORKER_PORT,
-        "models": MODELS
+        "models": MODELS,
+        "capacity": worker_metrics.capacity,
+        "hardware": HARDWARE
     }
 
-    try:
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=5
-        )
+    for offset in range(len(MIDDLEWARE_NODES)):
+        index = (current_middleware + offset) % len(MIDDLEWARE_NODES)
+        host, port = MIDDLEWARE_NODES[index]
 
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                f"http://{host}:{port}/register",
+                json=payload,
+                timeout=5
+            )
+            response.raise_for_status()
 
+        except requests.RequestException as exc:
+            print(
+                f"[REGISTER FAILED] worker={WORKER_ID} "
+                f"middleware={host}:{port} error={exc}"
+            )
+            continue
+
+        current_middleware = index
         print(
             f"[REGISTERED] worker={WORKER_ID} "
-            f"with middleware"
+            f"middleware={host}:{port}"
         )
+        return True
 
-    except requests.RequestException as exc:
+    return False
+
+
+def reconnect():
+    if not register_with_middleware():
         print(
-            f"[ERROR] registration failed: {exc}"
+            f"[RECONNECT FAILED] worker={WORKER_ID} "
+            f"no middleware reachable, will retry"
         )
-
-        raise SystemExit(1)
 
 
 if __name__ == "__main__":
@@ -210,6 +243,14 @@ if __name__ == "__main__":
         "--middleware-port",
         type=int,
         default=8000
+    )
+
+    parser.add_argument(
+        "--middleware",
+        default=None,
+        help="Comma-separated middleware nodes in preference order, "
+             "e.g. 127.0.0.1:8000,127.0.0.1:8001 "
+             "(overrides --middleware-host/--middleware-port)"
     )
 
     parser.add_argument(
