@@ -22,10 +22,12 @@ for ((i = FIRST; i <= LAST; i++)); do
     if [ "$PEERS_SUPPORTED" = yes ]; then
         start_process "middleware-$i" "$port" \
             "$PYTHON" -u "$ROOT/src/middleware/middleware.py" --port "$port" \
-            --node-id "middleware-$i" --peers-file "$RUN_DIR/peers.json" $MIDDLEWARE_ARGS
+            --node-id "middleware-$i" --peers-file "$RUN_DIR/peers.json" $MIDDLEWARE_ARGS \
+            || exit 1
     else
         start_process "middleware-$i" "$port" \
-            "$PYTHON" -u "$ROOT/src/middleware/middleware.py" --port "$port" $MIDDLEWARE_ARGS
+            "$PYTHON" -u "$ROOT/src/middleware/middleware.py" --port "$port" $MIDDLEWARE_ARGS \
+            || exit 1
     fi
 done
 

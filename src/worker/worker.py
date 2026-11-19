@@ -9,8 +9,6 @@ from heartbeat import start_heartbeat_thread
 from metrics import cpu_load_avg, hardware_info, worker_metrics
 
 app = Flask(__name__)
-from metrics import cpu_load_avg, hardware_info, worker_metrics
-
 
 WORKER_ID = None
 WORKER_HOST = None

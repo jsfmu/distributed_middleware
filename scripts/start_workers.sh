@@ -14,7 +14,8 @@ for ((i = 1; i <= COUNT; i++)); do
         "$PYTHON" -u "$ROOT/src/worker/worker.py" \
         --id "worker-$i" --port "$port" --models "$MODELS" \
         --middleware "$(middleware_list "$primary" "$MIDDLEWARE_COUNT")" \
-        --heartbeat-interval 2 $WORKER_ARGS
+        --heartbeat-interval 2 $WORKER_ARGS \
+        || exit 1
 done
 
 for ((i = 1; i <= COUNT; i++)); do

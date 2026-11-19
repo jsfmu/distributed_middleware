@@ -58,8 +58,8 @@ scenario_independent() {
 
     check "middleware-1 listens on port 8000" port_in_use "$(middleware_port 1)"
     check "middleware-2 listens on port 8001" port_in_use "$(middleware_port 2)"
-    check "middleware-1 knows $expected workers" equals "$(worker_count_on "$(middleware_port 1)")" "$expected"
-    check "middleware-2 knows $expected workers" equals "$(worker_count_on "$(middleware_port 2)")" "$expected"
+    check "middleware-1 knows $expected workers" wait_for_count "$(middleware_port 1)" "$expected" 15
+    check "middleware-2 knows $expected workers" wait_for_count "$(middleware_port 2)" "$expected" 15
 
     local w1 w2
     w1=$(infer_worker_id "$(middleware_port 1)")
