@@ -15,6 +15,10 @@ from routing import choose_routing_policy, select_worker
 HEARTBEAT_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 1
 
+# Middleware peer discovery settings
+PEER_DISCOVERY_INTERVAL = 2
+PEER_REQUEST_TIMEOUT = 2
+
 # Choose the routing policy
 ROUTING_POLICY = "adaptive"
 
@@ -376,6 +380,142 @@ def load_seed_peers(peers_file):
 
     return peer_registry.get_peer_count()
 
+# ----------------------------------------------------------------------
+# Automatic Middleware Peer Discovery
+# ----------------------------------------------------------------------
+
+# function to discover peers once by contacting known peers
+def discover_peers_once(local_host, local_port):
+    """
+    Contact each known peer, announce this middleware, and
+    retrieve additional peer information.
+
+    Unreachable peers remain in the registry for future retries.
+    """
+
+    announcement = {
+        "node_id": NODE_ID,
+        "host": local_host,
+        "port": local_port
+    }
+
+    # Use a snapshot so newly discovered peers are contacted
+    # during the next discovery cycle.
+    known_peers = peer_registry.get_all_peers()
+
+    for peer in known_peers:
+        peer_id = peer["node_id"]
+        peer_url = f"http://{peer['host']}:{peer['port']}"
+
+        try:
+            # Announce ourselves to the remote middleware.
+            response = requests.post(
+                f"{peer_url}/peer/join",
+                json=announcement,
+                timeout=PEER_REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+
+            # Retrieve the remote middleware's known peers.
+            response = requests.get(
+                f"{peer_url}/peers",
+                timeout=PEER_REQUEST_TIMEOUT
+            )
+            response.raise_for_status()
+
+            data = response.json()
+
+            if (
+                not isinstance(data, dict)
+                or data.get("node_id") != peer_id
+                or not isinstance(data.get("peers"), list)
+            ):
+                raise ValueError("Invalid peer discovery response")
+
+        except (requests.RequestException, ValueError) as exc:
+            peer_registry.set_peer_status(
+                peer_id,
+                "unavailable"
+            )
+
+            if peer["status"] != "unavailable":
+                print(
+                    f"[PEER UNAVAILABLE] node={NODE_ID} "
+                    f"peer={peer_id} error={exc}"
+                )
+
+            continue
+
+        # Successful HTTP communication confirms peer availability.
+        peer_registry.set_peer_status(
+            peer_id,
+            "healthy"
+        )
+
+        if peer["status"] != "healthy":
+            print(
+                f"[PEER HEALTHY] node={NODE_ID} "
+                f"peer={peer_id}"
+            )
+
+        # Learn about middleware nodes known by this peer.
+        for discovered in data["peers"]:
+            if not isinstance(discovered, dict):
+                continue
+
+            discovered_id = discovered.get("node_id")
+
+            # Never register the local node as its own peer.
+            if discovered_id == NODE_ID:
+                continue
+
+            existing = peer_registry.get_peer(discovered_id)
+
+            try:
+                peer_registry.add_or_update_peer(
+                    node_id=discovered_id,
+                    host=discovered.get("host"),
+                    port=discovered.get("port")
+                )
+            except ValueError:
+                continue
+
+            if existing is None:
+                print(
+                    f"[PEER DISCOVERED] node={NODE_ID} "
+                    f"peer={discovered_id}"
+                )
+
+# function to start a background thread for periodic peer discovery
+def start_peer_discovery(local_host, local_port):
+    """
+    Run peer discovery periodically in a daemon thread.
+
+    The thread does not block middleware HTTP request handling.
+    """
+
+    def discovery_loop():
+        while True:
+            try:
+                discover_peers_once(local_host, local_port)
+            except Exception as exc:
+                print(
+                    f"[PEER DISCOVERY ERROR] "
+                    f"node={NODE_ID} error={exc}"
+                )
+
+            time.sleep(PEER_DISCOVERY_INTERVAL)
+
+    thread = threading.Thread(
+        target=discovery_loop,
+        name="peer-discovery",
+        daemon=True
+    )
+
+    thread.start()
+
+    return thread
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Distributed AI Middleware"
@@ -433,6 +573,11 @@ if __name__ == "__main__":
         registry_lock,
         HEARTBEAT_TIMEOUT,
         HEALTH_CHECK_INTERVAL
+    )
+
+    start_peer_discovery(
+        local_host=args.host,
+        local_port=args.port
     )
 
     print(
