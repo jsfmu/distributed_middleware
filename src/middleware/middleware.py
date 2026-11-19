@@ -27,7 +27,7 @@ peer_registry = PeerRegistry()
 app = Flask(__name__)
 
 # ----------------------------------------------------------------------
-# Worker Registry
+# Middleware Health
 # ----------------------------------------------------------------------
 
 worker_registry = {}
@@ -42,6 +42,10 @@ def health():
         "routing_policy": ROUTING_POLICY,
         "peer_count": peer_registry.get_peer_count()
     })
+
+# ----------------------------------------------------------------------
+# Worker Registry
+# ----------------------------------------------------------------------
 
 @app.post("/register")
 def register_worker():
@@ -103,6 +107,90 @@ def list_workers():
         "workers": workers
     })
 
+# ----------------------------------------------------------------------
+# Middleware Peer Communication
+# ----------------------------------------------------------------------
+
+@app.get("/peers")
+def list_peers():
+    """
+    Return all known middleware peers.
+
+    The local node is excluded from the peer registry.
+    Peer status reflects the last known state, not necessarily
+    current network reachability.
+    """
+
+    peers = peer_registry.get_all_peers()
+
+    return jsonify({
+        "node_id": NODE_ID,
+        "count": len(peers),
+        "peers": peers
+    }), 200
+
+
+@app.post("/peer/join")
+def join_peer():
+    """
+    Register a middleware node as a known peer.
+
+    Registration does not automatically establish peer health
+    or synchronize worker registries.
+    """
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "request body must be a JSON object"
+        }), 400
+
+    required_fields = ["node_id", "host", "port"]
+
+    missing_fields = [
+        field for field in required_fields
+        if field not in data
+    ]
+
+    if missing_fields:
+        return jsonify({
+            "error": "missing required fields",
+            "missing": missing_fields
+        }), 400
+
+    if data["node_id"] == NODE_ID:
+        return jsonify({
+            "error": "middleware cannot register itself as a peer"
+        }), 400
+
+    try:
+        peer = peer_registry.add_or_update_peer(
+            node_id=data["node_id"],
+            host=data["host"],
+            port=data["port"]
+        )
+    except ValueError as exc:
+        return jsonify({
+            "error": str(exc)
+        }), 400
+
+    print(
+        f"[PEER JOIN] node={NODE_ID} "
+        f"peer={peer['node_id']} "
+        f"endpoint={peer['host']}:{peer['port']}"
+    )
+
+    return jsonify({
+        "message": "peer registered",
+        "node_id": NODE_ID,
+        "peer": peer,
+        "peer_count": peer_registry.get_peer_count()
+    }), 200
+
+# ----------------------------------------------------------------------
+# Inference Routing
+# ----------------------------------------------------------------------
 
 @app.post("/infer")
 def infer():
@@ -183,6 +271,10 @@ def infer():
             "worker_id": selected_worker["worker_id"],
             "details": str(exc)
         }), 502
+
+# ----------------------------------------------------------------------
+# Worker Heartbeats
+# ----------------------------------------------------------------------
 
 @app.post("/heartbeat")
 def receive_heartbeat():
