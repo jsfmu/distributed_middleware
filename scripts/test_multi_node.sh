@@ -39,6 +39,51 @@ wait_for_count() {
     return 1
 }
 
+# peer_status_on PORT PEER_ID:
+# Read a peer's status from the middleware peer registry.
+peer_status_on() {
+    curl -sf "http://$HOST:$1/peers" |
+        "$PYTHON" -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+peer_id = sys.argv[1]
+
+status = next(
+    (
+        peer.get("status", "")
+        for peer in data.get("peers", [])
+        if peer.get("node_id") == peer_id
+    ),
+    ""
+)
+
+print(status)
+' "$2" 2>/dev/null
+}
+
+
+# wait_for_peer_status PORT PEER_ID STATUS SECONDS:
+# Wait until the middleware reports the expected peer status.
+wait_for_peer_status() {
+    local port="$1"
+    local peer_id="$2"
+    local expected="$3"
+    local seconds="$4"
+    local i
+
+    for ((i = 0; i < seconds * 5; i++)); do
+        if [ "$(peer_status_on "$port" "$peer_id")" = "$expected" ]; then
+            return 0
+        fi
+        sleep 0.2
+    done
+
+    return 1
+}
+
+
 cleanup() {
     bash "$ROOT/scripts/stop_all.sh" > /dev/null
 }
@@ -103,13 +148,89 @@ scenario_crash() {
     cleanup
 }
 
+# scenario_peers: tests dynamic node discovery, failure detection, and membership recovery
+scenario_peers() {
+    echo "=== Scenario: middleware peer discovery and recovery"
+
+    # Start two middleware nodes and two workers.
+    start_cluster 2 2
+
+    # Both middleware nodes should discover each other.
+    check "middleware-1 discovers middleware-2" \
+        wait_for_peer_status "$(middleware_port 1)" \
+        "middleware-2" "healthy" 15
+
+    check "middleware-2 discovers middleware-1" \
+        wait_for_peer_status "$(middleware_port 2)" \
+        "middleware-1" "healthy" 15
+
+    # Start a third middleware without restarting existing nodes.
+    bash "$ROOT/scripts/start_middleware_nodes.sh" 1 3 \
+        > /dev/null || exit 1
+
+    # All three middleware nodes should discover each other.
+    check "middleware-1 discovers joining middleware-3" \
+        wait_for_peer_status "$(middleware_port 1)" \
+        "middleware-3" "healthy" 15
+
+    check "middleware-2 discovers joining middleware-3" \
+        wait_for_peer_status "$(middleware_port 2)" \
+        "middleware-3" "healthy" 15
+
+    check "middleware-3 discovers middleware-1" \
+        wait_for_peer_status "$(middleware_port 3)" \
+        "middleware-1" "healthy" 15
+
+    check "middleware-3 discovers middleware-2" \
+        wait_for_peer_status "$(middleware_port 3)" \
+        "middleware-2" "healthy" 15
+
+    # Simulate middleware-2 crashing.
+    stop_process middleware-2 KILL > /dev/null
+
+    check "middleware-1 detects middleware-2 failure" \
+        wait_for_peer_status "$(middleware_port 1)" \
+        "middleware-2" "unavailable" 15
+
+    check "middleware-3 detects middleware-2 failure" \
+        wait_for_peer_status "$(middleware_port 3)" \
+        "middleware-2" "unavailable" 15
+
+    # Restart middleware-2.
+    bash "$ROOT/scripts/start_middleware_nodes.sh" 1 2 \
+        > /dev/null || exit 1
+
+    # Verify peer availability recovers automatically.
+    check "middleware-1 detects middleware-2 recovery" \
+        wait_for_peer_status "$(middleware_port 1)" \
+        "middleware-2" "healthy" 15
+
+    check "middleware-3 detects middleware-2 recovery" \
+        wait_for_peer_status "$(middleware_port 3)" \
+        "middleware-2" "healthy" 15
+
+    cleanup
+}
+
+
+
 case "${1:-all}" in
     independent) scenario_independent ;;
     join)        scenario_join ;;
     crash)       scenario_crash ;;
-    all)         scenario_independent; scenario_join; scenario_crash ;;
-    *)           echo "usage: $0 [independent|join|crash|all]"; exit 2 ;;
+    peers)       scenario_peers ;;
+    all)
+        scenario_independent
+        scenario_join
+        scenario_crash
+        scenario_peers
+        ;;
+    *)
+        echo "usage: $0 [independent|join|crash|peers|all]"
+        exit 2
+        ;;
 esac
+
 
 echo
 if [ "$FAILURES" -eq 0 ]; then
