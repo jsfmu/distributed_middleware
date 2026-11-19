@@ -49,3 +49,6 @@ temp/
 
 # Generated benchmark results
 results/
+
+# Multi-node scripts (pid files)
+run/
