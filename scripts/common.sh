@@ -16,7 +16,16 @@ worker_port()     { echo $(( WORKER_BASE_PORT + $1 - 1 )); }
 
 # True if something is already listening on this port
 port_in_use() {
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    "$PYTHON" -c '
+import socket
+import sys
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.settimeout(0.5)
+    result = sock.connect_ex(("127.0.0.1", int(sys.argv[1])))
+
+sys.exit(0 if result == 0 else 1)
+' "$1"
 }
 
 # wait_for_http URL [SECONDS]: wait until the URL answers

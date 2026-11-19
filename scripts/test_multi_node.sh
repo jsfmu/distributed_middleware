@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 source "$(dirname "$0")/common.sh"
 
 FAILURES=0
@@ -38,16 +40,15 @@ wait_for_count() {
 }
 
 cleanup() {
-    "$ROOT/scripts/stop_all.sh" > /dev/null
+    bash "$ROOT/scripts/stop_all.sh" > /dev/null
 }
 trap cleanup EXIT
 
 # start_cluster MIDDLEWARE_COUNT WORKER_COUNT
 start_cluster() {
-    "$ROOT/scripts/start_middleware_nodes.sh" "$1" > /dev/null || exit 1
-    "$ROOT/scripts/start_workers.sh" "$2" "$1" > /dev/null || exit 1
+    bash "$ROOT/scripts/start_middleware_nodes.sh" "$1" > /dev/null || exit 1
+    bash "$ROOT/scripts/start_workers.sh" "$2" "$1" > /dev/null || exit 1
 }
-
 scenario_independent() {
     echo "=== Scenario: independent middleware nodes"
     start_cluster 2 4
@@ -72,7 +73,7 @@ scenario_independent() {
 scenario_join() {
     echo "=== Scenario: middleware-3 joins a running cluster"
     start_cluster 2 2
-    "$ROOT/scripts/start_middleware_nodes.sh" 1 3 > /dev/null || exit 1
+    bash "$ROOT/scripts/start_middleware_nodes.sh" 1 3 > /dev/null || exit 1
 
     check "middleware-3 listens on port 8002" port_in_use "$(middleware_port 3)"
     check "middleware-1 still healthy" http_ok "http://$HOST:$(middleware_port 1)/health"

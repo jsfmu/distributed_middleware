@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 source "$(dirname "$0")/common.sh"
 
 for pidfile in "$RUN_DIR"/*.pid; do
