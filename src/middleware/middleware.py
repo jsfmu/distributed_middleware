@@ -1,19 +1,28 @@
 import argparse
+import json
 import threading
 import time
+from pathlib import Path
 
 import requests
 from flask import Flask, jsonify, request
 
 from failure_detector import start_failure_detector
+from peers import PeerRegistry
 from routing import choose_routing_policy, select_worker
 
 
 HEARTBEAT_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 1
 
-# Choose the routing policy 
+# Choose the routing policy
 ROUTING_POLICY = "adaptive"
+
+# Middleware node identity
+NODE_ID = "middleware-8000"
+
+# Known middleware peers (separate from the worker registry)
+peer_registry = PeerRegistry()
 
 app = Flask(__name__)
 
@@ -29,9 +38,10 @@ def health():
     return jsonify({
         "status": "healthy",
         "service": "middleware",
-        "routing_policy": ROUTING_POLICY
+        "node_id": NODE_ID,
+        "routing_policy": ROUTING_POLICY,
+        "peer_count": peer_registry.get_peer_count()
     })
-
 
 @app.post("/register")
 def register_worker():
@@ -220,6 +230,60 @@ def find_workers_by_model(model):
 
     return matching_workers
 
+# function to load seed peers from a JSON file
+def load_seed_peers(peers_file):
+    """
+    Load known middleware peers from a JSON configuration file.
+
+    The local middleware node is excluded from its own peer registry.
+    All loaded peers initially have unknown health status.
+    """
+
+    try:
+        entries = json.loads(
+            Path(peers_file).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Failed to load peers file '{peers_file}': {exc}"
+        ) from exc
+
+    if not isinstance(entries, list):
+        raise ValueError(
+            "Peers configuration must be a JSON array"
+        )
+
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"Peer entry {index} must be a JSON object"
+            )
+
+        node_id = entry.get("node_id")
+
+        # Do not register this middleware as its own peer.
+        if node_id == NODE_ID:
+            continue
+
+        try:
+            peer_registry.add_or_update_peer(
+                node_id=node_id,
+                host=entry.get("host"),
+                port=entry.get("port")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid peer entry {index}: {exc}"
+            ) from exc
+
+    print(
+        f"[PEERS] node={NODE_ID} "
+        f"loaded={peer_registry.get_peer_count()} "
+        f"file={peers_file}"
+    )
+
+    return peer_registry.get_peer_count()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Distributed AI Middleware"
@@ -248,9 +312,29 @@ if __name__ == "__main__":
         default="adaptive"
     )
 
+    parser.add_argument(
+        "--node-id",
+        default=None,
+        help="Unique identifier for this middleware node"
+    )
+
+    parser.add_argument(
+        "--peers-file",
+        default=None,
+        help="JSON file containing known middleware peers"
+    )
+
     args = parser.parse_args()
 
     ROUTING_POLICY = args.routing_policy
+
+    NODE_ID = args.node_id or f"middleware-{args.port}"
+
+    if args.peers_file:
+        try:
+            load_seed_peers(args.peers_file)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     start_failure_detector(
         worker_registry,
@@ -260,9 +344,10 @@ if __name__ == "__main__":
     )
 
     print(
-        f"[MIDDLEWARE] running at "
-        f"http://{args.host}:{args.port} "
-        f"routing_policy={ROUTING_POLICY}"
+        f"[MIDDLEWARE] node={NODE_ID} "
+        f"running at http://{args.host}:{args.port} "
+        f"routing_policy={ROUTING_POLICY} "
+        f"known_peers={peer_registry.get_peer_count()}"
     )
 
     app.run(
