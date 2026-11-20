@@ -32,3 +32,22 @@ def build_gossip_meesage(node_id, state):
         "sender_id": node_id,
         "workers": workers
     }
+
+def send_gossip(peer, message, timeout=GOSSIP_TIMEOUT, retries=GOSSIP_RETRIES, retry_delay=GOSSIP_RETRY_DELAY):
+    url = f"http://{peer['host']}:{peer['port']}/gossip"
+    attempts = 1+  max(0, retries)
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(url, json=message, timeout=timeout)
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(retry_delay)
+            continue
+
+        if response.ok:
+            return "ok", None
+        return "rejected", f"HTTP {response.state_code}"
+    return "unreachable", str(last_error)
