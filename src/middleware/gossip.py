@@ -77,4 +77,15 @@ def gossip_once(node_id, peer_registry, get_state_fn, fanout=GOSSIP_FANOUT, retr
             print(f"[GOSSIP FAILED] node={node_id} peer={peer_id} " f"error={error}")
         return results
 
-    
+def gossip_once(node_id, peer_registry, get_state_fn, fanout=GOSSIP_FANOUT, interval=GOSSIP_INTERVAL, ):
+    stop_event = threading.Event()
+    def gossip_loop():
+        while not stop_event.is_set():
+            try:
+                gossip_once(node_id, peer_registry, get_state_fn, fanout)
+            except Exception as exc:
+                print(f"[GOSSIP ERROR] node={node_id} error={exc}")
+            stop_event.wait(interval)
+    thread = threading.Thread(target=gossip_loop, name="gossip", daemon=True)
+    thread.start()
+    return thread, stop_event
