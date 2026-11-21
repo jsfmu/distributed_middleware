@@ -11,6 +11,7 @@ from failure_detector import start_failure_detector
 from peers import PeerRegistry
 from routing import choose_routing_policy, select_worker
 
+from gossip import start_gossip
 
 HEARTBEAT_TIMEOUT = 30
 HEALTH_CHECK_INTERVAL = 1
@@ -516,6 +517,22 @@ def start_peer_discovery(local_host, local_port):
 
     return thread
 
+# gossip state export
+def export_gossip_state():
+    with registry_lock:
+        workers = [{
+            "worker_id": worker["worker_id"],
+            "host": worker["host"],
+            "port": worker["port"],
+            "models": worker["models"],
+            "status": worker["status"],
+            "owner": NODE_ID,
+            "active_requests": worker.get("active_requests", 0),
+            "capacity": worker.get("capacity")
+        }
+        for worker in worker_registry.values()]
+    return {"workers": workers}
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Distributed AI Middleware"
@@ -579,6 +596,13 @@ if __name__ == "__main__":
         local_host=args.host,
         local_port=args.port
     )
+
+    start_gossip(
+        node_id=NODE_ID,
+        peer_registry=peer_registry,
+        get_state_fn=export_gossip_state
+    )
+
 
     print(
         f"[MIDDLEWARE] node={NODE_ID} "
