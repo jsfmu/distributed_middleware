@@ -20,6 +20,9 @@ HEALTH_CHECK_INTERVAL = 1
 PEER_DISCOVERY_INTERVAL = 2
 PEER_REQUEST_TIMEOUT = 2
 
+# Maximum age of received gossip used for worker consolidation
+GOSSIP_SNAPSHOT_TTL = 30
+
 # Choose the routing policy
 ROUTING_POLICY = "adaptive"
 
@@ -37,6 +40,11 @@ app = Flask(__name__)
 
 worker_registry = {}
 registry_lock = threading.Lock()
+
+# Gossip received from other middleware nodes
+# Kept separate from the local worker registry
+received_gossip = {}
+received_gossip_lock = threading.Lock()
 
 @app.get("/health")
 def health():
@@ -192,6 +200,343 @@ def join_peer():
         "peer": peer,
         "peer_count": peer_registry.get_peer_count()
     }), 200
+
+
+# ----------------------------------------------------------------------
+# Middleware Gossip Reception
+# ----------------------------------------------------------------------
+
+def validate_gossip_message(data):
+    """
+    Validate incoming gossip and return (sender_id, workers).
+
+    Reject malformed messages before modifying stored state.
+    """
+
+    if not isinstance(data, dict):
+        raise ValueError("gossip payload must be a JSON object")
+
+    sender_id = data.get("sender_id")
+    workers = data.get("workers")
+
+    if not isinstance(sender_id, str) or not sender_id.strip():
+        raise ValueError("sender_id must be a non-empty string")
+
+    sender_id = sender_id.strip()
+
+    if sender_id == NODE_ID:
+        raise ValueError("middleware cannot receive its own gossip")
+
+    if not isinstance(workers, list):
+        raise ValueError("workers must be a list")
+
+    validated_workers = []
+    seen_worker_ids = set()
+
+    for index, worker in enumerate(workers):
+        if not isinstance(worker, dict):
+            raise ValueError(
+                f"worker entry {index} must be a JSON object"
+            )
+
+        worker_id = worker.get("worker_id")
+        host = worker.get("host")
+        port = worker.get("port")
+        models = worker.get("models")
+        status = worker.get("status")
+        owner = worker.get("owner")
+        active_requests = worker.get("active_requests", 0)
+        capacity = worker.get("capacity")
+
+        if not isinstance(worker_id, str) or not worker_id.strip():
+            raise ValueError(
+                f"worker entry {index} has invalid worker_id"
+            )
+
+        worker_id = worker_id.strip()
+
+        if worker_id in seen_worker_ids:
+            raise ValueError(
+                f"duplicate worker_id: {worker_id}"
+            )
+
+        if not isinstance(host, str) or not host.strip():
+            raise ValueError(
+                f"worker entry {index} has invalid host"
+            )
+
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= 65535
+        ):
+            raise ValueError(
+                f"worker entry {index} has invalid port"
+            )
+
+        if (
+            not isinstance(models, list)
+            or any(
+                not isinstance(model, str) or not model.strip()
+                for model in models
+            )
+        ):
+            raise ValueError(
+                f"worker entry {index} has invalid models"
+            )
+
+        if status not in {"healthy", "unavailable"}:
+            raise ValueError(
+                f"worker entry {index} has invalid status"
+            )
+
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError(
+                f"worker entry {index} has invalid owner"
+            )
+
+        if (
+            not isinstance(active_requests, int)
+            or isinstance(active_requests, bool)
+            or active_requests < 0
+        ):
+            raise ValueError(
+                f"worker entry {index} has invalid active_requests"
+            )
+
+        if capacity is not None and (
+            not isinstance(capacity, int)
+            or isinstance(capacity, bool)
+            or capacity <= 0
+        ):
+            raise ValueError(
+                f"worker entry {index} has invalid capacity"
+            )
+
+        validated_workers.append({
+            "worker_id": worker_id,
+            "host": host.strip(),
+            "port": port,
+            "models": list(models),
+            "status": status,
+            "owner": owner.strip(),
+            "active_requests": active_requests,
+            "capacity": capacity
+        })
+
+        seen_worker_ids.add(worker_id)
+
+    return sender_id, validated_workers
+
+
+@app.post("/gossip")
+def receive_gossip():
+    """
+    Receive worker snapshots from another middleware node.
+
+    Received workers are not added to the local routing registry.
+    """
+
+    data = request.get_json(silent=True)
+
+    try:
+        sender_id, workers = validate_gossip_message(data)
+    except ValueError as exc:
+        return jsonify({
+            "error": str(exc)
+        }), 400
+
+    with received_gossip_lock:
+        received_gossip[sender_id] = {
+            "sender_id": sender_id,
+            "workers": workers,
+            "received_at": time.time()
+        }
+
+    print(
+        f"[GOSSIP RECEIVED] node={NODE_ID} "
+        f"sender={sender_id} workers={len(workers)}"
+    )
+
+    return jsonify({
+        "message": "gossip received",
+        "node_id": NODE_ID,
+        "sender_id": sender_id,
+        "worker_count": len(workers)
+    }), 200
+
+
+@app.get("/gossip/received")
+def list_received_gossip():
+    """
+    Inspect received gossip snapshots for testing.
+    """
+
+    with received_gossip_lock:
+        sources = [
+            {
+                "sender_id": entry["sender_id"],
+                "received_at": entry["received_at"],
+                "worker_count": len(entry["workers"]),
+                "workers": [
+                    {
+                        **worker,
+                        "models": list(worker["models"])
+                    }
+                    for worker in entry["workers"]
+                ]
+            }
+            for _, entry in sorted(received_gossip.items())
+        ]
+
+    return jsonify({
+        "node_id": NODE_ID,
+        "source_count": len(sources),
+        "sources": sources
+    }), 200
+
+
+
+# ----------------------------------------------------------------------
+# Consolidated Worker View
+# ----------------------------------------------------------------------
+
+def build_consolidated_worker_view():
+    """
+    Combine local workers with fresh, directly owned gossip records.
+
+    Local workers take priority.
+    Conflicting remote ownership claims are excluded.
+    Does not modify the active worker_registry.
+    """
+
+    now = time.time()
+
+    # Copy local worker state under its existing lock.
+    with registry_lock:
+        local_workers = {}
+
+        for worker in worker_registry.values():
+            worker_id = worker["worker_id"]
+
+            local_workers[worker_id] = {
+                "worker_id": worker_id,
+                "host": worker["host"],
+                "port": worker["port"],
+                "models": list(worker["models"]),
+                "status": worker["status"],
+                "owner": NODE_ID,
+                "active_requests": worker.get("active_requests", 0),
+                "capacity": worker.get("capacity"),
+                "source": "local",
+                "last_gossip_at": None
+            }
+
+    # Copy received snapshots under the gossip lock.
+    with received_gossip_lock:
+        snapshots = [
+            {
+                "sender_id": entry["sender_id"],
+                "received_at": entry["received_at"],
+                "workers": [
+                    {
+                        **worker,
+                        "models": list(worker["models"])
+                    }
+                    for worker in entry["workers"]
+                ]
+            }
+            for entry in received_gossip.values()
+        ]
+
+    # Group remote ownership claims by worker ID.
+    claims = {}
+
+    for snapshot in snapshots:
+        sender_id = snapshot["sender_id"]
+        received_at = snapshot["received_at"]
+
+        # Ignore stale snapshots.
+        if now - received_at > GOSSIP_SNAPSHOT_TTL:
+            continue
+
+        for worker in snapshot["workers"]:
+            worker_id = worker["worker_id"]
+
+            # Only accept directly owned worker information.
+            # Forwarded gossip needs versioning in a later phase.
+            if worker["owner"] != sender_id:
+                continue
+
+            # Local registrations are authoritative on this node.
+            if worker_id in local_workers:
+                continue
+
+            claims.setdefault(worker_id, []).append({
+                "sender_id": sender_id,
+                "received_at": received_at,
+                "worker": worker
+            })
+
+    merged = dict(local_workers)
+    conflicts = []
+
+    for worker_id, worker_claims in claims.items():
+        owners = {
+            claim["sender_id"]
+            for claim in worker_claims
+        }
+
+        # Without ownership epochs, conflicting claims cannot
+        # be resolved safely using arrival time alone.
+        if len(owners) > 1:
+            conflicts.append(worker_id)
+            continue
+
+        claim = worker_claims[0]
+        worker = claim["worker"]
+
+        merged[worker_id] = {
+            **worker,
+            "models": list(worker["models"]),
+            "source": "gossip",
+            "last_gossip_at": claim["received_at"]
+        }
+
+    workers = [
+        merged[worker_id]
+        for worker_id in sorted(merged)
+    ]
+
+    return {
+        "count": len(workers),
+        "local_count": sum(
+            worker["source"] == "local" for worker in workers
+        ),
+        "remote_count": sum(
+            worker["source"] == "gossip" for worker in workers
+        ),
+        "conflict_count": len(conflicts),
+        "conflicts": sorted(conflicts),
+        "workers": workers
+    }
+
+
+@app.get("/gossip/workers")
+def list_consolidated_gossip_workers():
+    """
+    Inspect the consolidated worker view.
+
+    Remote workers remain excluded from active inference routing.
+    """
+
+    result = build_consolidated_worker_view()
+
+    return jsonify({
+        "node_id": NODE_ID,
+        **result
+    }), 200
+
 
 # ----------------------------------------------------------------------
 # Inference Routing
