@@ -20,3 +20,20 @@ def bump_version(state):
 
 def versioned_fields_changed(old_state, new_state):
     return any([old_state(field) != new_state.get(field) for field in VERSIONED_FIELDS])
+
+
+
+
+def compare_versions(a, b):
+    a = validate_version(a)
+    b = validate_version(b)
+
+    return (a > b) - (a < b)
+
+def is_stale(local, incoming):
+    if local is None: return False
+    return compare_versions(get_version(incoming), get_version(local)) < 0
+
+def is_duplicate(local, incoming):
+    if local is None: return False
+    return get_version(incoming) == get_version(local) and incoming.get("owner") == local.get("owner")
