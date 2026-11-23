@@ -26,7 +26,7 @@ def bump_version(state):
     return updated
 
 def versioned_fields_changed(old_state, new_state):
-    return any([old_state(field) != new_state.get(field) for field in VERSIONED_FIELDS])
+        return any([old_state.get(field) != new_state.get(field) for field in VERSIONED_FIELDS])
 
 
 
