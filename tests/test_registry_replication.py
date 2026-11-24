@@ -302,6 +302,218 @@ class TestVersionedRegistry(unittest.TestCase):
             original["models"], ["llama"]
         )
 
+    def test_equal_version_tombstone_wins(self):
+        live = {
+            **self.worker("worker-2"),
+            "owner": "middleware-2",
+            "version": 7,
+            "deleted": False
+        }
+
+        tombstone = {
+            "worker_id": "worker-2",
+            "owner": "middleware-2",
+            "version": 7,
+            "deleted": True
+        }
+
+        self.assertEqual(
+            self.a.apply_remote(live),
+            "added"
+        )
+
+        self.assertEqual(
+            self.a.apply_remote(tombstone),
+            "deleted"
+        )
+
+        # An equal-version live update must not
+        # resurrect a deleted worker.
+        self.assertEqual(
+            self.a.apply_remote(live),
+            replication.CONFLICT_LOST
+        )
+
+        state = self.a.replication_snapshot()
+
+        self.assertEqual(state["remote_count"], 0)
+        self.assertEqual(state["tombstone_count"], 1)
+
+    def test_re_registration_advances_past_tombstone(self):
+        self.a.sync_local_workers([
+            self.worker()
+        ])
+
+        first = self.a.export_gossip_records()[0]
+
+        # Remove the local worker.
+        self.a.sync_local_workers([])
+
+        tombstone = self.a.export_gossip_records()[0]
+
+        self.assertTrue(tombstone["deleted"])
+
+        # The same worker registers again.
+        self.a.sync_local_workers([
+            self.worker()
+        ])
+
+        restored = self.a.export_gossip_records()[0]
+
+        self.assertFalse(restored["deleted"])
+
+        # A newly registered worker must receive
+        # a newer version than its tombstone.
+        self.assertLess(
+            first["version"],
+            tombstone["version"]
+        )
+
+        self.assertLess(
+            tombstone["version"],
+            restored["version"]
+        )
+
+    def test_heartbeat_advances_version(self):
+        worker = self.worker()
+
+        self.a.sync_local_workers([worker])
+
+        first = self.a.export_gossip_records()[0]
+
+        # The same snapshot must not increment
+        # the version unnecessarily.
+        self.a.sync_local_workers([worker])
+
+        unchanged = self.a.export_gossip_records()[0]
+
+        self.assertEqual(
+            first["version"],
+            unchanged["version"]
+        )
+
+        # Simulate a new heartbeat timestamp.
+        updated = {
+            **worker,
+            "last_heartbeat": worker["last_heartbeat"] + 1
+        }
+
+        self.a.sync_local_workers([updated])
+
+        newer = self.a.export_gossip_records()[0]
+
+        self.assertGreater(
+            newer["version"],
+            first["version"]
+        )
+
+    def test_multiple_worker_updates_in_batch(self):
+        workers = [
+            self.worker("worker-1"),
+            self.worker("worker-2"),
+            self.worker("worker-3")
+        ]
+
+        self.a.sync_local_workers(workers)
+
+        outcomes = self.b.apply_remote_batch(
+            self.a.export_gossip_records()
+        )
+
+        self.assertEqual(len(outcomes), 3)
+
+        self.assertTrue(
+            all(
+                outcome == "added"
+                for outcome in outcomes.values()
+            )
+        )
+
+        # Update the load of only worker-2.
+        changed = [
+            {
+                **worker,
+                "active_requests": 4
+            }
+            if worker["worker_id"] == "worker-2"
+            else worker
+            for worker in workers
+        ]
+
+        self.a.sync_local_workers(changed)
+
+        self.b.apply_remote_batch(
+            self.a.export_gossip_records()
+        )
+
+        state = self.b.replication_snapshot()
+
+        by_id = {
+            record["worker_id"]: record
+            for record in state["remote_workers"]
+        }
+
+        self.assertEqual(len(by_id), 3)
+
+        self.assertEqual(
+            by_id["worker-2"]["active_requests"],
+            4
+        )
+
+        self.assertEqual(
+            by_id["worker-1"]["active_requests"],
+            0
+        )
+
+    def test_conflicting_owners_have_deterministic_winner(self):
+        first = {
+            **self.worker("shared"),
+            "owner": "middleware-2",
+            "version": 7,
+            "deleted": False
+        }
+
+        second = {
+            **self.worker("shared"),
+            "owner": "middleware-3",
+            "version": 7,
+            "deleted": False
+        }
+
+        self.a.apply_remote(first)
+        self.a.apply_remote(second)
+
+        state = self.a.replication_snapshot()
+
+        # Both claims remain available for
+        # ownership-conflict detection.
+        self.assertEqual(state["remote_count"], 2)
+
+        self.assertEqual(
+            state["conflicting_worker_ids"],
+            ["shared"]
+        )
+
+        # Joseph's resolver chooses the same winner
+        # regardless of message arrival order.
+        self.assertEqual(
+            state["resolved_remote_workers"][0]["owner"],
+            "middleware-3"
+        )
+
+        other = VersionedWorkerRegistry("middleware-4")
+
+        other.apply_remote(second)
+        other.apply_remote(first)
+
+        other_state = other.replication_snapshot()
+
+        self.assertEqual(
+            state["resolved_remote_workers"],
+            other_state["resolved_remote_workers"]
+        )
+
+
 
 class TestVersionedMiddlewareEndpoints(unittest.TestCase):
 
@@ -511,6 +723,45 @@ class TestVersionedMiddlewareEndpoints(unittest.TestCase):
                 "/replication/workers"
             ).get_json()["remote_count"],
             0
+        )
+
+    def test_versioned_gossip_preserves_routing_metadata(self):
+        remote = {
+            "worker_id": "remote-metadata",
+            "owner": "middleware-2",
+            "host": "127.0.0.1",
+            "port": 9102,
+            "models": ["llama"],
+            "status": "healthy",
+            "active_requests": 1,
+            "capacity": 4,
+            "cpu_load_1m": 1.25,
+            "hardware": {"gpu": "RTX"},
+            "version": 7,
+            "deleted": False
+        }
+
+        response = self.client.post("/gossip", json={
+            "sender_id": "middleware-2",
+            "workers": [remote]
+        })
+
+        self.assertEqual(response.status_code, 200)
+
+        state = self.client.get(
+            "/replication/workers"
+        ).get_json()
+
+        stored = state["remote_workers"][0]
+
+        self.assertEqual(stored["cpu_load_1m"], 1.25)
+        self.assertEqual(stored["hardware"], {"gpu": "RTX"})
+
+        # The original full record must now compare as
+        # a duplicate, not an equal-version conflict.
+        self.assertEqual(
+            self.middleware.replicated_registry.apply_remote(remote),
+            replication.DUPLICATE
         )
 
 

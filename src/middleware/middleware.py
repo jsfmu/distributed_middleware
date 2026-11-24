@@ -1,4 +1,6 @@
 import argparse
+import copy
+import math
 import json
 import threading
 import time
@@ -364,6 +366,25 @@ def validate_gossip_message(data):
                 f"worker entry {index} has invalid capacity"
             )
 
+        if has_version:
+            cpu_load_1m = worker.get("cpu_load_1m")
+            hardware = worker.get("hardware", {})
+
+            if cpu_load_1m is not None and (
+                not isinstance(cpu_load_1m, (int, float))
+                or isinstance(cpu_load_1m, bool)
+                or not math.isfinite(cpu_load_1m)
+                or cpu_load_1m < 0
+            ):
+                raise ValueError(
+                    f"worker entry {index} has invalid cpu_load_1m"
+                )
+
+            if not isinstance(hardware, dict):
+                raise ValueError(
+                    f"worker entry {index} has invalid hardware"
+                )
+
         record = {
             "worker_id": worker_id,
             "host": host.strip(),
@@ -378,6 +399,8 @@ def validate_gossip_message(data):
         if has_version:
             record["version"] = worker["version"]
             record["deleted"] = False
+            record["cpu_load_1m"] = cpu_load_1m
+            record["hardware"] = copy.deepcopy(hardware)
 
         validated_workers.append(record)
 

@@ -525,6 +525,46 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
                 )
             )
 
+        # Build a diagnostic view of remote ownership claims.
+        # Preserve all original claims for conflict detection.
+        resolved = {}
+        owners_by_worker = {}
+
+        remote_records = remote + [
+            record
+            for record in tombstones
+            if record["owner"] != self.node_id
+        ]
+
+        for record in remote_records:
+            worker_id = record["worker_id"]
+
+            owners_by_worker.setdefault(
+                worker_id, set()
+            ).add(record["owner"])
+
+            # Use Joseph's deterministic resolver.
+            winner, _ = replication.resolve_update(
+                resolved.get(worker_id),
+                record
+            )
+
+            resolved[worker_id] = copy.deepcopy(winner)
+
+        resolved_remote_workers = sorted(
+            resolved.values(),
+            key=lambda worker: (
+                worker["worker_id"],
+                worker["owner"]
+            )
+        )
+
+        conflicting_worker_ids = sorted(
+            worker_id
+            for worker_id, owners in owners_by_worker.items()
+            if len(owners) > 1
+        )
+
         return {
             "node_id": self.node_id,
             "local_count": len(local),
@@ -534,5 +574,7 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
             "local_workers": local,
             "remote_workers": remote,
             "fresh_remote_workers": fresh,
-            "tombstones": tombstones
+            "tombstones": tombstones,
+            "resolved_remote_workers": resolved_remote_workers,
+            "conflicting_worker_ids": conflicting_worker_ids
         }
