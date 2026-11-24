@@ -57,15 +57,80 @@ class TestVersionFormat(unittest.TestCase):
         self.assertEqual(original["version"], 7)
 
     def test_versioned_fields_changed(self):
-        self.assertTrue(replication.versioned_fields_changed(
-            state(1), state(1, status="unavailable")
-        ))
-
-        load_only = state(1)
-        load_only["active_requests"] = 5
-        self.assertFalse(
-            replication.versioned_fields_changed(state(1), load_only)
+        # Worker status changes must update the version.
+        self.assertTrue(
+            replication.versioned_fields_changed(
+                state(1),
+                state(1, status="unavailable")
+            )
         )
+
+        # Worker load changes must also update the version.
+        load_changed = state(1)
+        load_changed["active_requests"] = 5
+
+        self.assertTrue(
+            replication.versioned_fields_changed(
+                state(1), load_changed
+            )
+        )
+
+        # Heartbeat timestamps alone do not require a new version.
+        heartbeat_only = state(1)
+        heartbeat_only["last_heartbeat"] = 123.0
+
+        self.assertFalse(
+            replication.versioned_fields_changed(
+                state(1), heartbeat_only
+            )
+        )
+
+    def test_routing_and_deletion_fields_changed(self):
+        original = state(7)
+
+        changes = {
+            "active_requests": 4,
+            "capacity": 8,
+            "cpu_load_1m": 2.5,
+            "hardware": {"gpu": "RTX"},
+            "deleted": True
+        }
+
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                updated = dict(original)
+                updated[field] = value
+
+                self.assertTrue(
+                    replication.versioned_fields_changed(
+                        original, updated
+                    )
+                )
+
+        # Heartbeat timestamps are not versioned fields.
+        updated = dict(original)
+        updated["last_heartbeat"] = 123.0
+
+        self.assertFalse(
+            replication.versioned_fields_changed(
+                original, updated
+            )
+        )
+
+
+    def test_bump_version_deep_copies_metadata(self):
+        original = state(7)
+        original["hardware"] = {"gpu": "none"}
+
+        updated = replication.bump_version(original)
+
+        updated["models"].append("model-b")
+        updated["hardware"]["gpu"] = "RTX"
+
+        self.assertEqual(original["version"], 7)
+        self.assertEqual(original["models"], ["model-a"])
+        self.assertEqual(original["hardware"]["gpu"], "none")
+        self.assertEqual(updated["version"], 8)
 
 
 class TestComparison(unittest.TestCase):
@@ -150,6 +215,22 @@ class TestResolveUpdate(unittest.TestCase):
         self.assertFalse(replication.should_apply(state(8), state(6)))
         self.assertFalse(replication.should_apply(state(7), state(7)))
 
+    def test_equal_version_same_owner_conflict_converges(self):
+        a = state(7, status="healthy")
+        b = state(7, status="unavailable")
+
+        self.assertFalse(replication.is_duplicate(a, b))
+
+        winner_ab, outcome_ab = replication.resolve_update(a, b)
+        winner_ba, outcome_ba = replication.resolve_update(b, a)
+
+        self.assertEqual(winner_ab, winner_ba)
+
+        self.assertEqual(
+            {outcome_ab, outcome_ba},
+            {CONFLICT_WON, CONFLICT_LOST}
+        )
+
 
 class TestUpdateSequences(unittest.TestCase):
 
@@ -221,6 +302,20 @@ class TestUpdateSequences(unittest.TestCase):
     def test_missing_worker_id_rejected(self):
         with self.assertRaises(ValueError):
             replication.apply_update(self.states, {"version": 1})
+
+    def test_nested_state_is_copied(self):
+        incoming = state(1)
+        incoming["hardware"] = {"gpu": "none"}
+
+        replication.apply_update(self.states, incoming)
+
+        incoming["models"].append("model-b")
+        incoming["hardware"]["gpu"] = "RTX"
+
+        stored = self.states["worker-1"]
+
+        self.assertEqual(stored["models"], ["model-a"])
+        self.assertEqual(stored["hardware"]["gpu"], "none")
 
 
 if __name__ == "__main__":
