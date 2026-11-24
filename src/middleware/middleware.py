@@ -304,7 +304,7 @@ def validate_gossip_message(data):
                 "worker_id": worker_id,
                 "owner": owner,
                 "deleted": True,
-                "version": dict(worker["version"])
+                "version": worker["version"]
             })
 
             continue
@@ -376,7 +376,7 @@ def validate_gossip_message(data):
         }
 
         if has_version:
-            record["version"] = dict(worker["version"])
+            record["version"] = worker["version"]
             record["deleted"] = False
 
         validated_workers.append(record)

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "middleware"))
 
 from registry import VersionedWorkerRegistry
-
+import replication
 
 class TestVersionedRegistry(unittest.TestCase):
 
@@ -94,7 +94,7 @@ class TestVersionedRegistry(unittest.TestCase):
             2
         )
 
-    def test_equal_version_conflict_does_not_overwrite(self):
+    def test_equal_version_conflict_uses_resolver(self):
         self.a.sync_local_workers([
             self.worker()
         ])
@@ -111,16 +111,22 @@ class TestVersionedRegistry(unittest.TestCase):
             "active_requests": 99
         }
 
-        self.assertEqual(
-            self.b.apply_remote(altered),
-            "conflict"
+        # Joseph's resolver determines the winner.
+        winner, expected_outcome = replication.resolve_update(
+            record, altered
         )
 
-        state = self.b.replication_snapshot()
+        outcome = self.b.apply_remote(altered)
+
+        self.assertEqual(outcome, expected_outcome)
+
+        stored = self.b.replication_snapshot()[
+            "remote_workers"
+        ][0]
 
         self.assertEqual(
-            state["remote_workers"][0]["active_requests"],
-            0
+            stored["active_requests"],
+            winner["active_requests"]
         )
 
     def test_multi_hop_preserves_origin(self):
@@ -283,13 +289,17 @@ class TestVersionedRegistry(unittest.TestCase):
 
         exported = self.a.export_gossip_records()
 
-        exported[0]["version"]["revision"] = 9999
+        exported[0]["version"] = 9999
+        exported[0]["models"].append("changed")
 
         original = self.a.export_gossip_records()[0]
 
         self.assertNotEqual(
-            original["version"]["revision"],
-            9999
+            original["version"], 9999
+        )
+
+        self.assertEqual(
+            original["models"], ["llama"]
         )
 
 
@@ -385,10 +395,7 @@ class TestVersionedMiddlewareEndpoints(unittest.TestCase):
             "status": "healthy",
             "active_requests": 2,
             "capacity": 3,
-            "version": {
-                "generation": 100,
-                "revision": 2
-            },
+            "version": 2,
             "deleted": False
         }
 
@@ -401,10 +408,7 @@ class TestVersionedMiddlewareEndpoints(unittest.TestCase):
 
         older = {
             **remote,
-            "version": {
-                "generation": 100,
-                "revision": 1
-            },
+            "version": 1,
             "active_requests": 0
         }
 
@@ -442,10 +446,7 @@ class TestVersionedMiddlewareEndpoints(unittest.TestCase):
             "status": "healthy",
             "active_requests": 0,
             "capacity": 3,
-            "version": {
-                "generation": 100,
-                "revision": 1
-            },
+            "version": 1,
             "deleted": False
         }
 
@@ -460,10 +461,7 @@ class TestVersionedMiddlewareEndpoints(unittest.TestCase):
             "worker_id": "remote-1",
             "owner": "middleware-2",
             "deleted": True,
-            "version": {
-                "generation": 100,
-                "revision": 2
-            }
+            "version": 2
         }
 
         # Another peer forwards the deletion.
