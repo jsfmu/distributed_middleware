@@ -1,4 +1,6 @@
 import argparse
+import copy
+import math
 import json
 import threading
 import time
@@ -9,6 +11,7 @@ from flask import Flask, jsonify, request
 
 from failure_detector import start_failure_detector
 from peers import PeerRegistry
+from registry import VersionedWorkerRegistry
 from routing import choose_routing_policy, select_worker
 
 from gossip import start_gossip
@@ -31,6 +34,9 @@ NODE_ID = "middleware-8000"
 
 # Known middleware peers (separate from the worker registry)
 peer_registry = PeerRegistry()
+
+# Versioned worker state used for distributed replication
+replicated_registry = VersionedWorkerRegistry(NODE_ID)
 
 app = Flask(__name__)
 
@@ -97,6 +103,9 @@ def register_worker():
 
     with registry_lock:
         worker_registry[worker["worker_id"]] = worker
+
+    # Sync local worker state into the versioned replicated registry
+    sync_local_replication()
 
     print(
         f"[REGISTER] worker={worker['worker_id']} "
@@ -208,30 +217,38 @@ def join_peer():
 
 def validate_gossip_message(data):
     """
-    Validate incoming gossip and return (sender_id, workers).
+    Validate incoming gossip before modifying stored state.
 
-    Reject malformed messages before modifying stored state.
+    Supports legacy worker snapshots, versioned worker
+    records, and deletion tombstones.
     """
 
     if not isinstance(data, dict):
-        raise ValueError("gossip payload must be a JSON object")
+        raise ValueError(
+            "gossip payload must be a JSON object"
+        )
 
     sender_id = data.get("sender_id")
-    workers = data.get("workers")
 
     if not isinstance(sender_id, str) or not sender_id.strip():
-        raise ValueError("sender_id must be a non-empty string")
+        raise ValueError(
+            "sender_id must be a non-empty string"
+        )
 
     sender_id = sender_id.strip()
 
     if sender_id == NODE_ID:
-        raise ValueError("middleware cannot receive its own gossip")
+        raise ValueError(
+            "middleware cannot receive its own gossip"
+        )
+
+    workers = data.get("workers")
 
     if not isinstance(workers, list):
         raise ValueError("workers must be a list")
 
     validated_workers = []
-    seen_worker_ids = set()
+    seen = set()
 
     for index, worker in enumerate(workers):
         if not isinstance(worker, dict):
@@ -240,25 +257,66 @@ def validate_gossip_message(data):
             )
 
         worker_id = worker.get("worker_id")
-        host = worker.get("host")
-        port = worker.get("port")
-        models = worker.get("models")
-        status = worker.get("status")
         owner = worker.get("owner")
-        active_requests = worker.get("active_requests", 0)
-        capacity = worker.get("capacity")
 
         if not isinstance(worker_id, str) or not worker_id.strip():
             raise ValueError(
                 f"worker entry {index} has invalid worker_id"
             )
 
-        worker_id = worker_id.strip()
-
-        if worker_id in seen_worker_ids:
+        if not isinstance(owner, str) or not owner.strip():
             raise ValueError(
-                f"duplicate worker_id: {worker_id}"
+                f"worker entry {index} has invalid owner"
             )
+
+        worker_id = worker_id.strip()
+        owner = owner.strip()
+
+        key = (owner, worker_id)
+
+        if key in seen:
+            raise ValueError(
+                f"duplicate worker entry: {owner}/{worker_id}"
+            )
+
+        seen.add(key)
+
+        deleted = worker.get("deleted", False)
+
+        if not isinstance(deleted, bool):
+            raise ValueError(
+                f"worker entry {index} has invalid deleted flag"
+            )
+
+        has_version = "version" in worker
+
+        if has_version:
+            VersionedWorkerRegistry.validate_version(
+                worker["version"]
+            )
+
+        # Deleted records need only identity and version.
+        if deleted:
+            if not has_version:
+                raise ValueError(
+                    "deleted worker records require a version"
+                )
+
+            validated_workers.append({
+                "worker_id": worker_id,
+                "owner": owner,
+                "deleted": True,
+                "version": worker["version"]
+            })
+
+            continue
+
+        host = worker.get("host")
+        port = worker.get("port")
+        models = worker.get("models")
+        status = worker.get("status")
+        active_requests = worker.get("active_requests", 0)
+        capacity = worker.get("capacity")
 
         if not isinstance(host, str) or not host.strip():
             raise ValueError(
@@ -290,11 +348,6 @@ def validate_gossip_message(data):
                 f"worker entry {index} has invalid status"
             )
 
-        if not isinstance(owner, str) or not owner.strip():
-            raise ValueError(
-                f"worker entry {index} has invalid owner"
-            )
-
         if (
             not isinstance(active_requests, int)
             or isinstance(active_requests, bool)
@@ -313,20 +366,46 @@ def validate_gossip_message(data):
                 f"worker entry {index} has invalid capacity"
             )
 
-        validated_workers.append({
+        if has_version:
+            cpu_load_1m = worker.get("cpu_load_1m")
+            hardware = worker.get("hardware", {})
+
+            if cpu_load_1m is not None and (
+                not isinstance(cpu_load_1m, (int, float))
+                or isinstance(cpu_load_1m, bool)
+                or not math.isfinite(cpu_load_1m)
+                or cpu_load_1m < 0
+            ):
+                raise ValueError(
+                    f"worker entry {index} has invalid cpu_load_1m"
+                )
+
+            if not isinstance(hardware, dict):
+                raise ValueError(
+                    f"worker entry {index} has invalid hardware"
+                )
+
+        record = {
             "worker_id": worker_id,
             "host": host.strip(),
             "port": port,
             "models": list(models),
             "status": status,
-            "owner": owner.strip(),
+            "owner": owner,
             "active_requests": active_requests,
             "capacity": capacity
-        })
+        }
 
-        seen_worker_ids.add(worker_id)
+        if has_version:
+            record["version"] = worker["version"]
+            record["deleted"] = False
+            record["cpu_load_1m"] = cpu_load_1m
+            record["hardware"] = copy.deepcopy(hardware)
+
+        validated_workers.append(record)
 
     return sender_id, validated_workers
+
 
 
 @app.post("/gossip")
@@ -352,6 +431,16 @@ def receive_gossip():
             "workers": workers,
             "received_at": time.time()
         }
+
+    # Apply versioned updates to the replicated registry.
+    # Legacy messages without versions remain snapshot-only.
+    outcomes = replicated_registry.apply_remote_batch(workers)
+
+    if outcomes:
+        print(
+            f"[REPLICATION MERGE] node={NODE_ID} "
+            f"results={outcomes}"
+        )
 
     print(
         f"[GOSSIP RECEIVED] node={NODE_ID} "
@@ -381,7 +470,7 @@ def list_received_gossip():
                 "workers": [
                     {
                         **worker,
-                        "models": list(worker["models"])
+                        "models": list(worker.get("models", []))
                     }
                     for worker in entry["workers"]
                 ]
@@ -423,7 +512,7 @@ def build_consolidated_worker_view():
                 "worker_id": worker_id,
                 "host": worker["host"],
                 "port": worker["port"],
-                "models": list(worker["models"]),
+                "models": list(worker.get("models", [])),
                 "status": worker["status"],
                 "owner": NODE_ID,
                 "active_requests": worker.get("active_requests", 0),
@@ -441,7 +530,7 @@ def build_consolidated_worker_view():
                 "workers": [
                     {
                         **worker,
-                        "models": list(worker["models"])
+                        "models": list(worker.get("models", []))
                     }
                     for worker in entry["workers"]
                 ]
@@ -461,6 +550,10 @@ def build_consolidated_worker_view():
             continue
 
         for worker in snapshot["workers"]:
+            # Tombstones are not active worker records.
+            if worker.get("deleted", False):
+                continue
+
             worker_id = worker["worker_id"]
 
             # Only accept directly owned worker information.
@@ -498,7 +591,7 @@ def build_consolidated_worker_view():
 
         merged[worker_id] = {
             **worker,
-            "models": list(worker["models"]),
+            "models": list(worker.get("models", [])),
             "source": "gossip",
             "last_gossip_at": claim["received_at"]
         }
@@ -536,6 +629,43 @@ def list_consolidated_gossip_workers():
         "node_id": NODE_ID,
         **result
     }), 200
+
+
+# ----------------------------------------------------------------------
+# Versioned Worker Registry Synchronization
+# ----------------------------------------------------------------------
+
+def sync_local_replication():
+    """
+    Synchronize authoritative local worker state
+    with the versioned replicated registry.
+    """
+
+    with registry_lock:
+        workers = [
+            {
+                **worker,
+                "models": list(worker.get("models", []))
+            }
+            for worker in worker_registry.values()
+        ]
+
+        # Keep both operations serialized so an older
+        # snapshot cannot overwrite a newer local update.
+        replicated_registry.sync_local_workers(workers)
+
+
+@app.get("/replication/workers")
+def list_replicated_workers():
+    """
+    Inspect versioned local and remote worker state.
+    """
+
+    sync_local_replication()
+
+    return jsonify(
+        replicated_registry.replication_snapshot()
+    ), 200
 
 
 # ----------------------------------------------------------------------
@@ -646,6 +776,9 @@ def receive_heartbeat():
         worker_registry[worker_id]["active_requests"] = data.get("active_requests", 0)
         worker_registry[worker_id]["capacity"] = data.get("capacity")
         worker_registry[worker_id]["cpu_load_1m"] = data.get("cpu_load_1m")
+
+    # Sync local worker state into the versioned replicated registry
+    sync_local_replication()
 
     print(
         f"[HEARTBEAT] worker={worker_id} "
@@ -864,19 +997,16 @@ def start_peer_discovery(local_host, local_port):
 
 # gossip state export
 def export_gossip_state():
-    with registry_lock:
-        workers = [{
-            "worker_id": worker["worker_id"],
-            "host": worker["host"],
-            "port": worker["port"],
-            "models": worker["models"],
-            "status": worker["status"],
-            "owner": NODE_ID,
-            "active_requests": worker.get("active_requests", 0),
-            "capacity": worker.get("capacity")
-        }
-        for worker in worker_registry.values()]
-    return {"workers": workers}
+    """
+    Export versioned local workers, replicated remote
+    workers, and deletion tombstones.
+    """
+
+    sync_local_replication()
+
+    return {
+        "workers": replicated_registry.export_gossip_records()
+    }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -923,6 +1053,9 @@ if __name__ == "__main__":
     ROUTING_POLICY = args.routing_policy
 
     NODE_ID = args.node_id or f"middleware-{args.port}"
+
+    # Initialize replication with the final middleware node ID.
+    replicated_registry = VersionedWorkerRegistry(NODE_ID)
 
     if args.peers_file:
         try:
