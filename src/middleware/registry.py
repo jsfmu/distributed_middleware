@@ -3,6 +3,7 @@ import copy
 import threading
 import time
 
+import replication
 
 class ReplicatedWorkerRegistry:
     """
@@ -185,106 +186,62 @@ class ReplicatedWorkerRegistry:
             }
 
 
+
 class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
     """
-    Versioned worker registry for distributed replication.
+    Versioned worker storage using replication.py.
 
-    Local workers are authoritative on their owning node.
-    Remote records are applied only when their version is newer.
-
-    This registry does not change active inference routing.
+    Local workers remain authoritative on their owner.
+    Remote records are reconciled through Joseph's resolver.
     """
 
-    def __init__(self, node_id, comparator=None, remote_ttl=45):
+    def __init__(self, node_id, remote_ttl=45):
         super().__init__(node_id)
 
-        # Provisional process incarnation and revision counter
-        self._generation = time.time_ns()
-        self._revision = 0
-
-        # Can be replaced by Joseph's version comparator later
-        self._comparator = comparator or self.compare_versions
-
-        # Deleted worker records
-        self._tombstones = {}
-
-        # Track local heartbeats and remote update freshness
+        # Track versions independently for each local worker.
+        self._last_local_versions = {}
         self._last_local_heartbeats = {}
+
+        # Remote freshness and deletion metadata.
         self._remote_updated_at = {}
+        self._tombstones = {}
 
         self.remote_ttl = remote_ttl
 
     @staticmethod
     def validate_version(version):
-        """
-        Validate the provisional version format:
-        {"generation": int, "revision": int}
-        """
-
-        if not isinstance(version, dict):
-            raise ValueError("version must be an object")
-
-        for key in ("generation", "revision"):
-            value = version.get(key)
-
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
-            ):
-                raise ValueError(
-                    f"version.{key} must be a non-negative integer"
-                )
-
-        if set(version) != {"generation", "revision"}:
-            raise ValueError(
-                "version must contain only generation and revision"
-            )
+        return replication.validate_version(version)
 
     @staticmethod
     def compare_versions(incoming, current):
-        """
-        Compare two versions.
-
-        Returns:
-            1  incoming is newer
-            0  versions are equal
-           -1  incoming is older
-        """
-
-        VersionedWorkerRegistry.validate_version(incoming)
-        VersionedWorkerRegistry.validate_version(current)
-
-        a = (
-            incoming["generation"],
-            incoming["revision"]
+        return replication.compare_versions(
+            incoming, current
         )
 
-        b = (
-            current["generation"],
-            current["revision"]
+    def _new_version(self, worker_id):
+        """
+        Generate the next version for one local worker.
+
+        Must be called while holding self._lock.
+        """
+
+        previous = self._last_local_versions.get(
+            worker_id,
+            replication.INITIAL_VERSION
         )
 
-        return (a > b) - (a < b)
+        version = replication.bump_version({
+            "version": previous
+        })["version"]
 
-    def _new_version(self):
-        """
-        Generate the next local state version.
+        self._last_local_versions[worker_id] = version
 
-        Must be called while holding the registry lock.
-        """
-
-        self._revision += 1
-
-        return {
-            "generation": self._generation,
-            "revision": self._revision
-        }
+        return version
 
     def _local_record(self, worker):
         """
-        Convert an existing middleware worker into a
-        canonical replication record.
+        Convert a locally registered worker into a
+        replication record.
         """
 
         worker_id = self._get_worker_id(worker)
@@ -296,8 +253,14 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
             "models": copy.deepcopy(worker["models"]),
             "status": worker["status"],
             "owner": self.node_id,
-            "active_requests": worker.get("active_requests", 0),
+            "active_requests": worker.get(
+                "active_requests", 0
+            ),
             "capacity": worker.get("capacity"),
+            "cpu_load_1m": worker.get("cpu_load_1m"),
+            "hardware": copy.deepcopy(
+                worker.get("hardware", {})
+            ),
             "deleted": False
         }
 
@@ -305,8 +268,11 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
         """
         Synchronize authoritative local worker state.
 
-        New or changed records receive a new version.
-        Missing local workers become tombstones.
+        Changed fields receive a new integer version.
+        Owner heartbeats also advance the version so
+        fresh worker information continues propagating.
+
+        Removed workers become versioned tombstones.
         """
 
         with self._lock:
@@ -315,32 +281,26 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
             for worker in workers:
                 record = self._local_record(worker)
                 worker_id = record["worker_id"]
-
                 seen.add(worker_id)
 
-                heartbeat = worker.get("last_heartbeat")
                 old = self._local.get(worker_id)
+                heartbeat = worker.get("last_heartbeat")
 
-                old_data = (
-                    {
-                        key: value
-                        for key, value in old.items()
-                        if key != "version"
-                    }
-                    if old
-                    else None
+                # Use Joseph's field-change detection.
+                changed = replication.versioned_fields_changed(
+                    old, record
                 )
-
-                changed = old_data != record
 
                 heartbeat_changed = (
                     heartbeat is not None
-                    and self._last_local_heartbeats.get(worker_id)
-                    != heartbeat
+                    and heartbeat !=
+                    self._last_local_heartbeats.get(worker_id)
                 )
 
                 if changed or heartbeat_changed:
-                    record["version"] = self._new_version()
+                    record["version"] = self._new_version(
+                        worker_id
+                    )
 
                     self._local[worker_id] = record
 
@@ -349,109 +309,141 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
                         None
                     )
 
-                self._last_local_heartbeats[worker_id] = heartbeat
+                self._last_local_heartbeats[
+                    worker_id
+                ] = heartbeat
 
-            # Generate tombstones for removed local workers
+            # Workers removed from the authoritative
+            # registry become tombstones.
             for worker_id in list(self._local):
-                if worker_id not in seen:
-                    self._local.pop(worker_id)
+                if worker_id in seen:
+                    continue
 
-                    self._last_local_heartbeats.pop(
-                        worker_id, None
-                    )
+                self._local.pop(worker_id)
 
-                    self._tombstones[
-                        (self.node_id, worker_id)
-                    ] = {
-                        "worker_id": worker_id,
-                        "owner": self.node_id,
-                        "deleted": True,
-                        "version": self._new_version()
-                    }
+                self._last_local_heartbeats.pop(
+                    worker_id, None
+                )
+
+                self._tombstones[
+                    (self.node_id, worker_id)
+                ] = {
+                    "worker_id": worker_id,
+                    "owner": self.node_id,
+                    "deleted": True,
+                    "version": self._new_version(worker_id)
+                }
 
     def apply_remote(self, worker):
         """
-        Apply one incoming versioned worker record.
+        Apply a remote ownership claim using
+        replication.resolve_update().
 
-        Returns:
-            added
-            updated
-            deleted
-            duplicate
-            stale
-            conflict
-            ignored
+        Records belonging to different owners remain
+        separately identifiable for ownership checks.
         """
 
         worker_id = self._get_worker_id(worker)
         owner = worker.get("owner")
 
         if not isinstance(owner, str) or not owner.strip():
-            raise ValueError("remote record requires owner")
+            raise ValueError(
+                "remote record requires owner"
+            )
 
         owner = owner.strip()
 
-        # Never allow gossip to overwrite local ownership.
+        # Never overwrite locally authoritative state.
         if owner == self.node_id:
             return "ignored"
 
-        version = worker.get("version")
-        self.validate_version(version)
+        version = replication.validate_version(
+            worker.get("version")
+        )
 
         deleted = worker.get("deleted", False)
 
         if not isinstance(deleted, bool):
-            raise ValueError("deleted must be a boolean")
+            raise ValueError(
+                "deleted must be a boolean"
+            )
 
         key = (owner, worker_id)
 
         record = copy.deepcopy(worker)
-        record["owner"] = owner
-        record["worker_id"] = worker_id
-        record["deleted"] = deleted
+        record.update({
+            "worker_id": worker_id,
+            "owner": owner,
+            "version": version,
+            "deleted": deleted
+        })
 
         with self._lock:
-            old = (
-                self._remote.get(key)
-                or self._tombstones.get(key)
-            )
+            old = self._remote.get(key)
 
-            if old is not None:
-                comparison = self._comparator(
-                    version,
-                    old["version"]
+            if old is None:
+                old = self._tombstones.get(key)
+
+            # A tombstone wins over a live record when
+            # both claim the same owner and version.
+            if (
+                old is not None
+                and old["version"] == version
+                and old.get("deleted", False) != deleted
+            ):
+                outcome = (
+                    replication.CONFLICT_WON
+                    if deleted
+                    else replication.CONFLICT_LOST
                 )
 
-                if comparison < 0:
-                    return "stale"
+                if not deleted:
+                    return outcome
 
-                if comparison == 0:
-                    if record == old:
-                        return "duplicate"
+                winner = record
 
-                    return "conflict"
+            else:
+                winner, outcome = replication.resolve_update(
+                    old, record
+                )
 
-            if deleted:
+            # Reject stale, duplicate, or losing updates.
+            if outcome not in replication.ACCEPTED_OUTCOMES:
+                return outcome
+
+            accepted = copy.deepcopy(winner)
+
+            if accepted["deleted"]:
                 self._remote.pop(key, None)
-                self._remote_updated_at.pop(key, None)
 
-                self._tombstones[key] = record
+                self._remote_updated_at.pop(
+                    key, None
+                )
+
+                self._tombstones[key] = accepted
 
                 return "deleted"
 
-            self._remote[key] = record
+            self._remote[key] = accepted
             self._tombstones.pop(key, None)
 
             self._remote_updated_at[key] = time.time()
 
-            return "updated" if old is not None else "added"
+            # Preserve the existing registry result names
+            # for ordinary accepted updates.
+            if outcome == replication.NEW:
+                return "added"
+
+            if outcome == replication.NEWER:
+                return "updated"
+
+            return outcome
 
     def apply_remote_batch(self, workers):
         """
         Apply incoming versioned records.
 
-        Legacy gossip messages without versions are ignored
-        by replication but can still be stored as snapshots.
+        Legacy unversioned gossip remains snapshot-only.
         """
 
         outcomes = {}
@@ -460,34 +452,30 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
             if "version" not in worker:
                 continue
 
-            label = (
+            key = (
                 worker["owner"],
                 worker["worker_id"]
             )
 
-            outcomes[label] = self.apply_remote(worker)
+            outcomes[key] = self.apply_remote(worker)
 
         return outcomes
 
     def export_gossip_records(self):
         """
-        Export all known versioned records.
-
-        Includes:
-        - Locally owned workers
-        - Replicated remote workers
-        - Tombstones
-
-        This enables multi-hop propagation.
+        Export local workers, remote records, and
+        tombstones for multi-hop gossip.
         """
 
         with self._lock:
-            result = list(self._local.values())
-            result += list(self._remote.values())
-            result += list(self._tombstones.values())
+            records = (
+                list(self._local.values())
+                + list(self._remote.values())
+                + list(self._tombstones.values())
+            )
 
             return sorted(
-                copy.deepcopy(result),
+                copy.deepcopy(records),
                 key=lambda worker: (
                     worker["worker_id"],
                     worker["owner"]
@@ -496,10 +484,10 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
 
     def replication_snapshot(self):
         """
-        Return a snapshot of the versioned registry.
+        Return a consistent registry snapshot.
 
-        Freshness affects diagnostic eligibility but does
-        not erase retained version metadata.
+        Fresh remote workers are those with accepted
+        recent owner-state updates.
         """
 
         now = time.time()
@@ -518,19 +506,17 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
             )
 
             fresh = [
-                copy.deepcopy(record)
-                for key, record in self._remote.items()
+                copy.deepcopy(self._remote[key])
+                for key in self._remote
                 if (
-                    now - self._remote_updated_at.get(key, 0)
-                    <= self.remote_ttl
+                    now - self._remote_updated_at.get(
+                        key, 0
+                    ) <= self.remote_ttl
                 )
             ]
 
         for records in (
-            local,
-            remote,
-            fresh,
-            tombstones
+            local, remote, fresh, tombstones
         ):
             records.sort(
                 key=lambda worker: (
@@ -538,6 +524,46 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
                     worker["owner"]
                 )
             )
+
+        # Build a diagnostic view of remote ownership claims.
+        # Preserve all original claims for conflict detection.
+        resolved = {}
+        owners_by_worker = {}
+
+        remote_records = remote + [
+            record
+            for record in tombstones
+            if record["owner"] != self.node_id
+        ]
+
+        for record in remote_records:
+            worker_id = record["worker_id"]
+
+            owners_by_worker.setdefault(
+                worker_id, set()
+            ).add(record["owner"])
+
+            # Use Joseph's deterministic resolver.
+            winner, _ = replication.resolve_update(
+                resolved.get(worker_id),
+                record
+            )
+
+            resolved[worker_id] = copy.deepcopy(winner)
+
+        resolved_remote_workers = sorted(
+            resolved.values(),
+            key=lambda worker: (
+                worker["worker_id"],
+                worker["owner"]
+            )
+        )
+
+        conflicting_worker_ids = sorted(
+            worker_id
+            for worker_id, owners in owners_by_worker.items()
+            if len(owners) > 1
+        )
 
         return {
             "node_id": self.node_id,
@@ -548,5 +574,7 @@ class VersionedWorkerRegistry(ReplicatedWorkerRegistry):
             "local_workers": local,
             "remote_workers": remote,
             "fresh_remote_workers": fresh,
-            "tombstones": tombstones
+            "tombstones": tombstones,
+            "resolved_remote_workers": resolved_remote_workers,
+            "conflicting_worker_ids": conflicting_worker_ids
         }

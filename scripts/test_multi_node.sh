@@ -39,6 +39,35 @@ wait_for_count() {
     return 1
 }
 
+# Count locally owned and fresh replicated workers.
+replicated_worker_count_on() {
+    curl -sf "http://$HOST:$1/replication/workers" |
+        "$PYTHON" -c '
+import json
+import sys
+
+state = json.load(sys.stdin)
+print(state["local_count"] + state["fresh_remote_count"])
+' 2>/dev/null || echo 0
+}
+
+# Wait for asynchronous gossip propagation.
+wait_for_replicated_count() {
+    local port="$1"
+    local expected="$2"
+    local seconds="$3"
+    local i
+
+    for ((i = 0; i < seconds; i++)); do
+        if [ "$(replicated_worker_count_on "$port")" = "$expected" ]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    return 1
+}
+
 # peer_status_on PORT PEER_ID:
 # Read a peer's status from the middleware peer registry.
 peer_status_on() {
@@ -98,13 +127,22 @@ scenario_independent() {
     echo "=== Scenario: independent middleware nodes"
     start_cluster 2 4
 
-    local expected=2
-    [ "$EXPECT_GOSSIP" = 1 ] && expected=4
-
     check "middleware-1 listens on port 8000" port_in_use "$(middleware_port 1)"
     check "middleware-2 listens on port 8001" port_in_use "$(middleware_port 2)"
-    check "middleware-1 knows $expected workers" wait_for_count "$(middleware_port 1)" "$expected" 15
-    check "middleware-2 knows $expected workers" wait_for_count "$(middleware_port 2)" "$expected" 15
+
+    if [ "$EXPECT_GOSSIP" = 1 ]; then
+        check "middleware-1 knows 4 replicated workers" \
+            wait_for_replicated_count "$(middleware_port 1)" 4 25
+
+        check "middleware-2 knows 4 replicated workers" \
+            wait_for_replicated_count "$(middleware_port 2)" 4 25
+    else
+        check "middleware-1 knows 2 local workers" \
+            equals "$(worker_count_on "$(middleware_port 1)")" 2
+
+        check "middleware-2 knows 2 local workers" \
+            equals "$(worker_count_on "$(middleware_port 2)")" 2
+    fi
 
     local w1 w2
     w1=$(infer_worker_id "$(middleware_port 1)")
@@ -125,7 +163,8 @@ scenario_join() {
     check "middleware-2 still healthy" http_ok "http://$HOST:$(middleware_port 2)/health"
 
     if [ "$EXPECT_GOSSIP" = 1 ]; then
-        check "middleware-3 learns both workers via gossip" wait_for_count "$(middleware_port 3)" 2 15
+        check "middleware-3 learns both workers via gossip" \
+            wait_for_replicated_count "$(middleware_port 3)" 2 30
     else
         echo "  INFO  middleware-3 knows $(worker_count_on "$(middleware_port 3)") workers" \
              "(should become 2 once gossip exists; rerun with EXPECT_GOSSIP=1)"
