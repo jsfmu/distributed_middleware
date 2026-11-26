@@ -4,6 +4,7 @@ import math
 import json
 import threading
 import time
+import os
 from pathlib import Path
 
 import requests
@@ -13,6 +14,12 @@ from failure_detector import start_failure_detector
 from peers import PeerRegistry
 from registry import VersionedWorkerRegistry
 from routing import choose_routing_policy, select_worker
+from distributed_routing import (
+    WorkerQuarantine,
+    build_routing_candidates,
+    safe_to_retry,
+    worker_key
+)
 
 from gossip import start_gossip
 
@@ -28,6 +35,36 @@ GOSSIP_SNAPSHOT_TTL = 30
 
 # Choose the routing policy
 ROUTING_POLICY = "adaptive"
+
+# Disabled by default to preserve previous routing behavior.
+ENABLE_DISTRIBUTED_ROUTING = False
+
+# Maximum worker attempts per inference request.
+MAX_INFER_ATTEMPTS = 3
+
+# Only explicitly configured remote worker destinations are eligible.
+# The defaults support the local multi-node test environment.
+REMOTE_WORKER_ALLOWED_HOSTS = {
+    host.strip()
+    for host in os.environ.get(
+        "REMOTE_WORKER_ALLOWED_HOSTS",
+        "127.0.0.1"
+    ).split(",")
+    if host.strip()
+}
+
+REMOTE_WORKER_MIN_PORT = int(
+    os.environ.get("REMOTE_WORKER_MIN_PORT", "9100")
+)
+
+REMOTE_WORKER_MAX_PORT = int(
+    os.environ.get("REMOTE_WORKER_MAX_PORT", "9199")
+)
+
+# Temporarily exclude unreachable workers.
+routing_quarantine = WorkerQuarantine(
+    cooldown_seconds=10
+)
 
 # Middleware node identity
 NODE_ID = "middleware-8000"
@@ -669,8 +706,78 @@ def list_replicated_workers():
 
 
 # ----------------------------------------------------------------------
-# Inference Routing
+# Distributed Inference Routing
 # ----------------------------------------------------------------------
+
+def get_routing_candidates(model):
+    """
+    Combine local workers with accepted, fresh,
+    trusted remote worker records.
+    """
+
+    with registry_lock:
+        local_workers = [
+            dict(worker)
+            for worker in worker_registry.values()
+        ]
+
+    snapshot = (
+        replicated_registry.replication_snapshot()
+        if ENABLE_DISTRIBUTED_ROUTING
+        else {}
+    )
+
+    trusted_owners = {
+        peer["node_id"]
+        for peer in peer_registry.get_all_peers()
+    }
+
+    return build_routing_candidates(
+        local_workers=local_workers,
+        replica_snapshot=snapshot,
+        node_id=NODE_ID,
+        model=model,
+        include_remote=ENABLE_DISTRIBUTED_ROUTING,
+        trusted_owners=trusted_owners,
+        allowed_remote_hosts=REMOTE_WORKER_ALLOWED_HOSTS,
+        remote_port_range=(
+            REMOTE_WORKER_MIN_PORT,
+            REMOTE_WORKER_MAX_PORT
+        )
+    )
+
+
+@app.get("/routing/candidates")
+def list_routing_candidates():
+    """
+    Inspect eligible local and remote routing candidates.
+    """
+
+    model = request.args.get("model")
+
+    if not model:
+        return jsonify({
+            "error": "model is required"
+        }), 400
+
+    candidates = get_routing_candidates(model)
+
+    return jsonify({
+        "node_id": NODE_ID,
+        "distributed_routing_enabled": ENABLE_DISTRIBUTED_ROUTING,
+        "model": model,
+        "count": len(candidates),
+        "local_count": sum(
+            w["route_scope"] == "local"
+            for w in candidates
+        ),
+        "remote_count": sum(
+            w["route_scope"] == "remote"
+            for w in candidates
+        ),
+        "workers": candidates
+    }), 200
+
 
 @app.post("/infer")
 def infer():
@@ -689,68 +796,141 @@ def infer():
             "error": "input is required"
         }), 400
 
-    matching_workers = find_workers_by_model(model)
+    # Obtain eligible local and remote workers.
+    candidates = get_routing_candidates(model)
 
-    if not matching_workers:
+    if not candidates:
         return jsonify({
             "error": "no worker supports requested model",
             "model": model
         }), 404
 
-    # Determine which routing policy to use
-    selected_policy = ROUTING_POLICY
-    policy_reason = "manual_override"
+    attempted = set()
+    last_error = None
+    last_failed_worker = None
 
-    if ROUTING_POLICY == "adaptive":
-        selected_policy, policy_reason = choose_routing_policy(
-            matching_workers
+    max_attempts = min(
+        MAX_INFER_ATTEMPTS,
+        len(candidates)
+    )
+
+    for attempt in range(1, max_attempts + 1):
+
+        # Exclude workers already attempted or quarantined.
+        available = [
+            worker
+            for worker in candidates
+            if worker_key(worker) not in attempted
+            and not routing_quarantine.is_quarantined(worker)
+        ]
+
+        if not available:
+            break
+
+        # Preserve the five existing routing strategies.
+        selected_policy = ROUTING_POLICY
+        policy_reason = "manual_override"
+
+        if ROUTING_POLICY == "adaptive":
+            selected_policy, policy_reason = choose_routing_policy(
+                available
+            )
+
+        selected_worker = select_worker(
+            selected_policy,
+            model,
+            available
         )
 
-    # Select a worker using the chosen policy
-    selected_worker = select_worker(
-        selected_policy,
-        model,
-        matching_workers
-    )
+        attempted.add(worker_key(selected_worker))
 
-    worker_url = (
-        f"http://{selected_worker['host']}:"
-        f"{selected_worker['port']}/infer"
-    )
-
-    print(
-        f"[ROUTE] model={model} "
-        f"worker={selected_worker['worker_id']} "
-        f"load={selected_worker.get('active_requests', 0)} "
-        f"capacity={selected_worker.get('capacity')} "
-        f"mode={ROUTING_POLICY} "
-        f"policy={selected_policy} "
-        f"reason={policy_reason}"
-    )
-
-    try:
-        response = requests.post(
-            worker_url,
-            json={
-                "model": model,
-                "input": input_data
-            },
-            timeout=5
+        worker_url = (
+            f"http://{selected_worker['host']}:"
+            f"{selected_worker['port']}/infer"
         )
 
-        result = jsonify(response.json())
+        print(
+            f"[DISTRIBUTED ROUTE] node={NODE_ID} "
+            f"model={model} "
+            f"worker={selected_worker['worker_id']} "
+            f"owner={selected_worker['owner']} "
+            f"scope={selected_worker['route_scope']} "
+            f"policy={selected_policy} "
+            f"attempt={attempt}"
+        )
+
+        try:
+            response = requests.post(
+                worker_url,
+                json={
+                    "model": model,
+                    "input": input_data
+                },
+                timeout=5
+            )
+
+        except requests.RequestException as exc:
+
+            # Retry only when the connection was not established.
+            if safe_to_retry(exc):
+                routing_quarantine.mark_failed(
+                    selected_worker
+                )
+
+                last_error = str(exc)
+                last_failed_worker = selected_worker["worker_id"]
+                continue
+
+            # Do not retry ambiguous errors: execution may
+            # already have occurred on the selected worker.
+            return jsonify({
+                "error": (
+                    "failed to contact worker; "
+                    "request was not retried"
+                ),
+                "worker_id": selected_worker["worker_id"],
+                "details": str(exc)
+            }), 502
+
+        # Forward the worker's response without automatically
+        # retrying HTTP errors.
+        try:
+            payload = response.json()
+
+        except ValueError:
+            payload = {
+                "error": "worker returned non-JSON response",
+                "worker_id": selected_worker["worker_id"]
+            }
+
+        result = jsonify(payload)
 
         result.headers["X-Routing-Policy"] = selected_policy
         result.headers["X-Routing-Reason"] = policy_reason
+        result.headers["X-Worker-Owner"] = (
+            selected_worker["owner"]
+        )
+        result.headers["X-Worker-Scope"] = (
+            selected_worker["route_scope"]
+        )
+        result.headers["X-Routing-Attempts"] = str(attempt)
 
         return result, response.status_code
 
-    except requests.RequestException as exc:
+    # All allowed attempts failed before connecting.
+    if last_error is not None:
         return jsonify({
-            "error": "failed to contact worker",
-            "worker_id": selected_worker["worker_id"],
-            "details": str(exc)
+            "error": "no reachable worker could be selected",
+            "worker_id": last_failed_worker,
+            "details": last_error,
+            "attempted": len(attempted)
         }), 502
+
+    return jsonify({
+        "error": "all matching workers are temporarily quarantined",
+        "model": model
+    }), 503
+
 
 # ----------------------------------------------------------------------
 # Worker Heartbeats
@@ -1048,9 +1228,16 @@ if __name__ == "__main__":
         help="JSON file containing known middleware peers"
     )
 
+    parser.add_argument(
+        "--distributed-routing",
+        action="store_true",
+        help="Enable routing to eligible remote workers"
+    )
+
     args = parser.parse_args()
 
     ROUTING_POLICY = args.routing_policy
+    ENABLE_DISTRIBUTED_ROUTING = args.distributed_routing
 
     NODE_ID = args.node_id or f"middleware-{args.port}"
 
