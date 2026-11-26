@@ -282,10 +282,7 @@ class TestDistributedInferEndpoints(unittest.TestCase):
     def add_remote(self, worker_id="a-remote"):
         record = {
             **worker(worker_id, "middleware-2"),
-            "version": {
-                "generation": 100,
-                "revision": 1
-            },
+            "version": 1,
             "deleted": False
         }
 
